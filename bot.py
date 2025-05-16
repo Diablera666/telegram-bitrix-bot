@@ -1,55 +1,63 @@
 import os
-import logging
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils import executor
-import aiohttp
-from dotenv import load_dotenv
+from flask import Flask, request
+import telebot
+import requests
 
-load_dotenv()
-
-API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
 
-logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-menu_buttons = ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"]
-RESPONSIBLE_IDS = {
+# ID сотрудников для задач
+employee_ids = {
     "Вопрос 1": 270,
     "Вопрос 2": 12,
     "Вопрос 3": 270,
     "Другое": 12
 }
 
-markup = ReplyKeyboardMarkup(resize_keyboard=True)
-markup.add(*[KeyboardButton(text=b) for b in menu_buttons])
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    markup = telebot.types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add('Вопрос 1', 'Вопрос 2', 'Вопрос 3', 'Другое')
+    bot.send_message(message.chat.id, "Выберите пункт меню:", reply_markup=markup)
 
-@dp.message_handler(commands=["start"])
-async def cmd_start(message: types.Message):
-    await message.answer("Выберите тип запроса:", reply_markup=markup)
-
-@dp.message_handler(lambda message: message.text in menu_buttons)
-async def handle_question(message: types.Message):
-    task_type = message.text
-    await message.answer("Опишите суть задачи:")
-    await bot.send_message(message.from_user.id, "Жду описание...")
-    dp.register_message_handler(lambda m: process_description(m, task_type), content_types=types.ContentTypes.TEXT, state=None)
-
-async def process_description(message: types.Message, task_type: str):
-    description = message.text
-    responsible_id = RESPONSIBLE_IDS.get(task_type, 12)
-    task_data = {
-        "fields": {
-            "TITLE": f"Telegram: {task_type}",
-            "DESCRIPTION": description,
-            "RESPONSIBLE_ID": responsible_id
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    text = message.text
+    if text in employee_ids:
+        employee_id = employee_ids[text]
+        task_data = {
+            "fields": {
+                "TITLE": f"Задача из бота: {text}",
+                "RESPONSIBLE_ID": employee_id,
+                "DESCRIPTION": f"Задача создана из Telegram бота по пункту '{text}'"
+            }
         }
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(BITRIX_WEBHOOK_URL, json=task_data) as resp:
-            if resp.status == 200:
-                await message.answer("Задача успешно создана ✅")
-            else:
-                await message.answer("Ошибка при создании задачи ❌")
+        response = requests.post(BITRIX_WEBHOOK_URL, json=task_data)
+        if response.status_code == 200:
+            bot.send_message(message.chat.id, f"Задача по '{text}' создана!")
+        else:
+            bot.send_message(message.chat.id, f"Ошибка при создании задачи: {response.text}")
+    else:
+        bot.send_message(message.chat.id, "Пожалуйста, выберите пункт меню.")
+
+@app.route(f"/{TOKEN}", methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "ok", 200
+
+@app.route('/')
+def index():
+    return "Бот работает!"
+
+if __name__ == "__main__":
+    render_url = os.getenv("RENDER_EXTERNAL_URL")
+    webhook_url = f"{render_url}/{TOKEN}"
+    bot.remove_webhook()
+    bot.set_webhook(url=webhook_url)
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host="0.0.0.0", port=port)
