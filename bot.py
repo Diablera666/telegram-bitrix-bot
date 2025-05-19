@@ -189,7 +189,8 @@ def inline_buttons(call):
 
 # ────────────────────────── запуск ────────────────────────────────
 def run_bot():
-    bot.delete_webhook()
+    # Явно удаляем webhook перед polling
+    bot.remove_webhook()
     while True:
         try:
             bot.infinity_polling(long_polling_timeout=25, timeout=10, skip_pending=True)
