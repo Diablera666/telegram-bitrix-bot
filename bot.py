@@ -20,8 +20,8 @@ def add_workdays(start_date, workdays):
     added_days = 0
     while added_days < workdays:
         current_date += timedelta(days=1)
-        # Понедельник=0 ... Воскресенье=6
-        if current_date.weekday() < 5:  # только рабочие дни
+        # Понедельник = 0 ... Воскресенье = 6
+        if current_date.weekday() < 5:          # только рабочие дни
             added_days += 1
     return current_date
 
@@ -33,7 +33,7 @@ def send_welcome(message):
 # Здесь добавь логику выбора пункта меню и сбора текста/файлов (по твоему текущему сценарию)
 
 def create_bitrix_task(task_title, task_description, responsible_id):
-    deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')  # формат ISO
+    deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')  # ISO-формат
 
     data = {
         "fields": {
@@ -51,8 +51,9 @@ def create_bitrix_task(task_title, task_description, responsible_id):
         print("Ошибка создания задачи в Битрикс24:", response.text)
         return False
 
-# Запуск polling в отдельном потоке
+# --- Запуск polling в отдельном потоке ---
 def run_bot():
+    bot.delete_webhook()        # <--- добавили эту строку
     bot.infinity_polling()
 
 @app.route("/")
@@ -60,8 +61,9 @@ def index():
     return "Bot is running!"
 
 if __name__ == "__main__":
-    bot_thread = threading.Thread(target=run_bot)
-    bot_thread.start()
+    # Telegram-бот в отдельном потоке
+    threading.Thread(target=run_bot).start()
 
+    # Мини-Flask-сервер для Render
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
