@@ -1,4 +1,5 @@
 import os
+import time
 import threading
 from datetime import datetime, timedelta
 from flask import Flask
@@ -14,6 +15,7 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
+CREATOR_ID = 12  # ID постановщика задачи в Битрикс24
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
@@ -47,6 +49,7 @@ def create_bitrix_task(title: str, description: str, responsible_id: int) -> boo
             "TITLE": title,
             "DESCRIPTION": description,
             "RESPONSIBLE_ID": responsible_id,
+            "CREATED_BY": CREATOR_ID,  # постановщик задачи
             "DEADLINE": deadline
         }
     }
@@ -151,7 +154,17 @@ def inline_buttons(call):
 # --------------- запуск ----------------
 def run_bot():
     bot.delete_webhook()
-    bot.infinity_polling()
+
+    while True:
+        try:
+            bot.infinity_polling(
+                long_polling_timeout=25,   # ≤ лимита Render
+                timeout=10,
+                skip_pending=True
+            )
+        except Exception as e:
+            print("Polling crashed:", e)
+            time.sleep(5)  # подождать и заново
 
 @app.route("/")
 def index():
