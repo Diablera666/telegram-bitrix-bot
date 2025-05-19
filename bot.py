@@ -18,13 +18,13 @@ BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# ---------------------- вспом-функции ----------------------
+# ---------------- вспом-функции ----------------
 def add_workdays(start_date: datetime, workdays: int) -> datetime:
     cur = start_date
     added = 0
     while added < workdays:
         cur += timedelta(days=1)
-        if cur.weekday() < 5:          # Пн-Пт
+        if cur.weekday() < 5:  # Пн-Пт
             added += 1
     return cur
 
@@ -56,7 +56,7 @@ def create_bitrix_task(title: str, description: str, responsible_id: int) -> boo
     print("Bitrix24 error:", resp.text)
     return False
 
-# ---------------------- клавиатуры ----------------------
+# ---------------- клавиатуры ----------------
 menu_kb = ReplyKeyboardMarkup(resize_keyboard=True)
 menu_kb.add(
     KeyboardButton("Вопрос 1"),
@@ -71,28 +71,27 @@ def finish_kb() -> InlineKeyboardMarkup:
     kb.add(InlineKeyboardButton("↩️ Назад в меню", callback_data="back"))
     return kb
 
-# ---------------------- состояния ----------------------
-user_state = {}          # chat_id → {choice, buffer_text, buffer_files}
+# ----------- состояния пользователей ----------
+user_state = {}  # chat_id → {choice, buffer_text, buffer_files}
 
-# ---------------------- хэндлеры ----------------------
+# --------------- хэндлеры ----------------
 @bot.message_handler(commands=['start'])
 def cmd_start(message):
-    bot.send_message(
-        message.chat.id,
-        "Привет! Выберите пункт меню:",
-        reply_markup=menu_kb
-    )
+    bot.send_message(message.chat.id,
+                     "Привет! Выберите пункт меню:",
+                     reply_markup=menu_kb)
 
-@bot.message_handler(func=lambda m: m.text in ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"])
+@bot.message_handler(func=lambda m: m.text in
+                     ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"])
 def handle_menu(message):
     chat = message.chat.id
-    user_state[chat] = {"choice": message.text, "buffer_text": "", "buffer_files": []}
-    bot.send_message(
-        chat,
-        f"Вы выбрали: <b>{message.text}</b>\n"
-        "Пришлите текст или файлы. Когда закончите — нажмите «✅ Подтвердить».",
-        reply_markup=finish_kb()
-    )
+    user_state[chat] = {"choice": message.text,
+                        "buffer_text": "",
+                        "buffer_files": []}
+    bot.send_message(chat,
+                     f"Вы выбрали: <b>{message.text}</b>\n"
+                     "Пришлите текст или файлы. Когда закончите — нажмите «✅ Подтвердить».",
+                     reply_markup=finish_kb())
 
 @bot.message_handler(content_types=['text', 'photo', 'document', 'video'])
 def collect_input(message):
@@ -109,11 +108,9 @@ def collect_input(message):
             st["buffer_files"].append(link)
 
     preview = st["buffer_text"].strip() or "(без текста)"
-    bot.send_message(
-        chat,
-        f"Черновик:\n{preview}\n\nФайлов: {len(st['buffer_files'])}",
-        reply_markup=finish_kb()
-    )
+    bot.send_message(chat,
+                     f"Черновик:\n{preview}\n\nФайлов: {len(st['buffer_files'])}",
+                     reply_markup=finish_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data in ["ok", "back"])
 def inline_buttons(call):
@@ -122,27 +119,36 @@ def inline_buttons(call):
 
     if data == "back":
         user_state.pop(chat, None)
-        bot.edit_message_reply_markup(chat, call.message.message_id, reply_markup=None)
+        bot.edit_message_reply_markup(chat, call.message.message_id,
+                                      reply_markup=None)
         bot.send_message(chat, "Возврат в меню.", reply_markup=menu_kb)
 
     elif data == "ok":
         st = user_state.pop(chat, None)
         if not st:
             return
-        description = st["buffer_text"].strip()
+
+        author = (f"@{call.from_user.username}"
+                  if call.from_user.username
+                  else f"{call.from_user.first_name or ''} "
+                       f"{call.from_user.last_name or ''}".strip())
+
+        description = f"Автор: {author}\n\n{st['buffer_text'].strip()}"
         if st["buffer_files"]:
-            description += "\n\nСсылки на файлы:\n" + "\n".join(st["buffer_files"])
+            description += ("\n\nСсылки на файлы:\n" +
+                            "\n".join(st["buffer_files"]))
+
         resp_id = 270 if st["choice"] in ["Вопрос 1", "Вопрос 3"] else 12
         success = create_bitrix_task(st["choice"], description, resp_id)
 
-        bot.edit_message_reply_markup(chat, call.message.message_id, reply_markup=None)
-        bot.send_message(
-            chat,
-            "✅ Задача создана!" if success else "❌ Не удалось создать задачу.",
-            reply_markup=menu_kb
-        )
+        bot.edit_message_reply_markup(chat, call.message.message_id,
+                                      reply_markup=None)
+        bot.send_message(chat,
+                         "✅ Задача создана!" if success
+                         else "❌ Не удалось создать задачу.",
+                         reply_markup=menu_kb)
 
-# ---------------------- запуск ----------------------
+# --------------- запуск ----------------
 def run_bot():
     bot.delete_webhook()
     bot.infinity_polling()
