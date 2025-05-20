@@ -33,7 +33,6 @@ if not BITRIX_WEBHOOK_URL:
     raise ValueError("Не задан BITRIX_WEBHOOK_URL в переменных окружения")
 
 CREATOR_ID = 12  # ID постановщика задачи в Битrix24
-STORAGE_ID = 11
 PARENT_ID = 5636  # Папка "Загруженные файлы" на общем диске Bitrix24
 
 # ID ответственных в зависимости от типа вопроса
@@ -54,88 +53,69 @@ StatesDict = Dict[int, UserState]
 
 # Состояния пользователей
 user_state: StatesDict = {}
-last_callback_time: Dict[int, float] = {}  # Для защиты от частых нажатий
+last_callback_time: Dict[int, float] = {}
 
-# ---------------- вспомогательные функции ----------------
 def add_workdays(start_date: datetime, workdays: int) -> datetime:
-    """Добавляет указанное количество рабочих дней к дате."""
     cur = start_date
     added = 0
     while added < workdays:
         cur += timedelta(days=1)
-        if cur.weekday() < 5:  # Пн-Пт
+        if cur.weekday() < 5:
             added += 1
     return cur
 
-def get_file_info(message: Message) -> Optional[Dict[str, str]]:
-    """Получает информацию о файле из сообщения."""
-    content_type = message.content_type
-    try:
-        if content_type == "photo":
-            return {"file_id": message.photo[-1].file_id, "type": "photo"}
-        elif content_type == "video":
-            return {"file_id": message.video.file_id, "type": "video"}
-        elif content_type == "document":
-            return {"file_id": message.document.file_id, "type": "document"}
-        else:
-            logger.warning(f"Unsupported content type: {content_type}")
-            return None
-    except Exception as e:
-        logger.error(f"Error getting file info: {e}")
-        return None
-
 def file_link(message: Message) -> Optional[str]:
-    """Получает ссылку на файл Telegram для предварительного просмотра."""
     try:
-        file_info = get_file_info(message)
-        if not file_info:
+        if message.content_type == "photo":
+            file_id = message.photo[-1].file_id
+        elif message.content_type == "video":
+            file_id = message.video.file_id
+        elif message.content_type == "document":
+            file_id = message.document.file_id
+        else:
+            logger.warning(f"Unsupported content type: {message.content_type}")
             return None
 
-        info = bot.get_file(file_info["file_id"])
+        info = bot.get_file(file_id)
         return f"https://api.telegram.org/file/bot{TOKEN}/{info.file_path}"
-
     except Exception as e:
         logger.error(f"Error getting file link: {e}")
         return None
 
-def download_file(url: str) -> Optional[str]:
-    """Скачивает файл по URL во временный файл."""
+def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional[int]:
+    local_filename = None
     try:
-        local_filename = url.split('/')[-1].split('?')[0]
-        with requests.get(url, stream=True, timeout=30) as resp:
+        # Скачиваем файл временно
+        local_filename = file_url.split('/')[-1].split('?')[0]
+        with requests.get(file_url, stream=True, timeout=30) as resp:
             resp.raise_for_status()
             with open(local_filename, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
-        return local_filename
-    except Exception as e:
-        logger.error(f"Error downloading file: {e}")
-        return None
 
-def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional[int]:
-    """
-    Загружает файл из URL в Bitrix24 в указанную папку.
-    Возвращает attachedId или None в случае ошибки.
-    """
-    local_filename = None
-    try:
-        local_filename = download_file(file_url)
-        if not local_filename:
-            return None
-
+        # Загружаем в Bitrix24
         upload_url = BITRIX_WEBHOOK_URL.replace('task.item.add.json', 'disk.folder.uploadfile.json')
         
         with open(local_filename, 'rb') as f:
-            files = {'file': f}
+            files = {'file': (os.path.basename(local_filename), f)}
             data = {'id': folder_id}
+            
             response = requests.post(upload_url, data=data, files=files, timeout=30)
             response.raise_for_status()
-            
             result = response.json()
-            if 'result' in result:
-                return result['result']['attachedId']
             
-            logger.error(f"Bitrix24 upload error: {result.get('error', 'Unknown error')}")
+            logger.info(f"Bitrix24 upload response: {result}")
+
+            # Обрабатываем разные форматы ответов
+            if 'result' in result:
+                if 'ATTACHED_OBJECT' in result['result']:
+                    return result['result']['ATTACHED_OBJECT']['ID']
+                elif 'attachedId' in result['result']:
+                    return result['result']['attachedId']
+                elif 'ID' in result['result']:
+                    return result['result']['ID']
+            
+            logger.error(f"No file ID in response: {result}")
             return None
 
     except Exception as e:
@@ -149,11 +129,7 @@ def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional
                 logger.error(f"Error removing temp file: {e}")
 
 def create_bitrix_task(title: str, description: str, responsible_id: int, 
-                      attached_ids: Optional[List[int]] = None) -> bool:
-    """
-    Создает задачу в Bitrix24 с указанными параметрами.
-    Возвращает True в случае успеха, False в случае ошибки.
-    """
+                     attached_ids: Optional[List[int]] = None) -> bool:
     deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')
     fields = {
         "TITLE": title,
@@ -164,7 +140,8 @@ def create_bitrix_task(title: str, description: str, responsible_id: int,
     }
     
     if attached_ids:
-        fields["UF_TASK_WEBDAV_FILES"] = attached_ids
+        fields["UF_TASK_WEBDAV_FILES"] = [str(id) for id in attached_ids]
+        logger.info(f"Attaching files: {attached_ids}")
 
     try:
         response = requests.post(
@@ -172,21 +149,15 @@ def create_bitrix_task(title: str, description: str, responsible_id: int,
             json={"fields": fields},
             timeout=15
         )
-        response.raise_for_status()
+        logger.info(f"Task creation response: {response.status_code}, {response.text}")
         
-        if response.status_code == 200:
-            return True
-            
-        logger.error(f"Bitrix24 task creation error: {response.text}")
-        return False
+        return response.status_code == 200
         
     except Exception as e:
-        logger.error(f"Error creating Bitrix task: {e}")
+        logger.error(f"Error creating task: {e}")
         return False
 
-# ---------------- клавиатуры ----------------
 def create_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Создает основную клавиатуру меню."""
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
         KeyboardButton("Вопрос 1"),
@@ -197,7 +168,6 @@ def create_menu_keyboard() -> ReplyKeyboardMarkup:
     return kb
 
 def create_finish_keyboard() -> InlineKeyboardMarkup:
-    """Создает инлайн-клавиатуру для завершения работы с задачей."""
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("✅ Подтвердить", callback_data="ok"),
@@ -207,223 +177,125 @@ def create_finish_keyboard() -> InlineKeyboardMarkup:
     )
     return kb
 
-# ----------- обработка состояний ----------
 def is_throttled(chat_id: int, delay_sec: float = 1.5) -> bool:
-    """Проверяет, не слишком ли часто приходят запросы от пользователя."""
     now = time.time()
     last_time = last_callback_time.get(chat_id, 0)
-    
     if now - last_time < delay_sec:
         return True
-        
     last_callback_time[chat_id] = now
     return False
 
-def clear_user_state(chat_id: int) -> None:
-    """Очищает состояние пользователя."""
-    if chat_id in user_state:
-        del user_state[chat_id]
-
-def get_user_info(call: CallbackQuery) -> str:
-    """Формирует строку с информацией о пользователе."""
-    user = call.from_user
-    if user.username:
-        return f"@{user.username}"
-    return f"{user.first_name or ''} {user.last_name or ''}".strip()
-
-# --------------- хэндлеры ----------------
 @bot.message_handler(commands=['start', 'help'])
-def cmd_start(message: Message) -> None:
-    """Обработчик команд /start и /help."""
+def cmd_start(message: Message):
     bot.send_message(
         message.chat.id,
-        "Привет! Я бот для создания задач в Bitrix24.\n"
-        "Выберите тип вопроса из меню ниже:",
+        "Привет! Я бот для создания задач в Bitrix24.\nВыберите тип вопроса:",
         reply_markup=create_menu_keyboard()
     )
 
 @bot.message_handler(func=lambda m: m.text in ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"])
-def handle_menu(message: Message) -> None:
-    """Обработчик выбора пункта меню."""
+def handle_menu(message: Message):
     chat_id = message.chat.id
-    choice = message.text
-    
     user_state[chat_id] = {
-        "choice": choice,
+        "choice": message.text,
         "buffer_text": "",
         "buffer_files": []
     }
-    
     bot.send_message(
         chat_id,
-        f"Вы выбрали: <b>{choice}</b>\n\n"
-        "Пришлите текст сообщения или файлы (фото, видео, документы).\n"
-        "Когда закончите, нажмите «✅ Подтвердить».",
+        f"Вы выбрали: <b>{message.text}</b>\nПришлите текст или файлы.",
         reply_markup=create_finish_keyboard()
     )
 
 @bot.message_handler(content_types=['text', 'photo', 'document', 'video'])
-def collect_input(message: Message) -> None:
-    """Собирает ввод пользователя (текст и файлы)."""
+def collect_input(message: Message):
     chat_id = message.chat.id
     if chat_id not in user_state:
         return
 
     state = user_state[chat_id]
-    
     if message.content_type == 'text':
         state["buffer_text"] += message.text + "\n"
     else:
         link = file_link(message)
         if link:
             state["buffer_files"].append(link)
-        else:
-            logger.warning(f"Failed to get file link for {message.content_type}")
 
-    # Формируем превью сообщения
-    preview = state["buffer_text"].strip() or "<i>(текст не добавлен)</i>"
-    files_count = len(state["buffer_files"])
-    
+    preview = state["buffer_text"].strip() or "<i>(без текста)</i>"
     bot.send_message(
         chat_id,
-        f"<b>Текущий черновик:</b>\n{preview}\n\n"
-        f"<b>Прикреплено файлов:</b> {files_count}",
+        f"Черновик:\n{preview}\nФайлов: {len(state['buffer_files'])}",
         reply_markup=create_finish_keyboard()
     )
 
 @bot.callback_query_handler(func=lambda c: c.data in ["ok", "back", "delete_last_file", "cancel"])
-def handle_callbacks(call: CallbackQuery) -> None:
-    """Обработчик inline-кнопок."""
+def handle_callbacks(call: CallbackQuery):
     chat_id = call.message.chat.id
     data = call.data
 
-    # Защита от частых нажатий
     if is_throttled(chat_id):
-        bot.answer_callback_query(call.id, "Пожалуйста, подождите...")
+        bot.answer_callback_query(call.id, "Подождите...")
         return
 
     if data == "back":
-        clear_user_state(chat_id)
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-        bot.send_message(
-            chat_id,
-            "Возвращаемся в главное меню.",
-            reply_markup=create_menu_keyboard()
-        )
-        return
+        user_state.pop(chat_id, None)
+        bot.send_message(chat_id, "Меню:", reply_markup=create_menu_keyboard())
 
-    if data == "cancel":
-        clear_user_state(chat_id)
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-        bot.send_message(
-            chat_id,
-            "Создание задачи отменено.",
-            reply_markup=create_menu_keyboard()
-        )
-        return
+    elif data == "cancel":
+        user_state.pop(chat_id, None)
+        bot.send_message(chat_id, "Отменено.", reply_markup=create_menu_keyboard())
 
-    state = user_state.get(chat_id)
-    if not state:
-        bot.answer_callback_query(call.id, "Сессия устарела. Пожалуйста, выберите пункт меню заново.")
-        bot.send_message(chat_id, "Возврат в меню.", reply_markup=create_menu_keyboard())
-        return
+    elif data == "delete_last_file":
+        if chat_id in user_state and user_state[chat_id]["buffer_files"]:
+            user_state[chat_id]["buffer_files"].pop()
+            bot.answer_callback_query(call.id, "Файл удалён")
 
-    if data == "delete_last_file":
-        if not state["buffer_files"]:
-            bot.answer_callback_query(call.id, "Нет файлов для удаления.")
+    elif data == "ok":
+        if chat_id not in user_state:
+            bot.answer_callback_query(call.id, "Сессия устарела")
             return
 
-        state["buffer_files"].pop()
-        bot.answer_callback_query(call.id, "Последний файл удалён.")
-
-        preview = state["buffer_text"].strip() or "<i>(текст не добавлен)</i>"
-        bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=call.message.message_id,
-            text=f"<b>Текущий черновик:</b>\n{preview}\n\n"
-                 f"<b>Прикреплено файлов:</b> {len(state['buffer_files'])}",
-            reply_markup=create_finish_keyboard()
-        )
-        return
-
-    if data == "ok":
-        # Проверяем, что есть хотя бы текст или файлы
-        if not state["buffer_text"].strip() and not state["buffer_files"]:
-            bot.answer_callback_query(
-                call.id,
-                "Добавьте текст или файлы перед подтверждением!"
-            )
+        state = user_state[chat_id]
+        if not state["buffer_text"] and not state["buffer_files"]:
+            bot.answer_callback_query(call.id, "Добавьте текст или файлы")
             return
 
-        author = get_user_info(call)
-        description = f"Автор: {author}\n\n{state['buffer_text'].strip()}"
-
-        # Загружаем файлы в Bitrix24
+        # Загружаем файлы
         attached_ids = []
         for file_url in state["buffer_files"]:
-            attached_id = upload_file_to_bitrix(file_url)
-            if attached_id:
-                attached_ids.append(attached_id)
+            file_id = upload_file_to_bitrix(file_url)
+            if file_id:
+                attached_ids.append(file_id)
             else:
                 logger.warning(f"Failed to upload file: {file_url}")
 
-        # Получаем ID ответственного
-        responsible_id = RESPONSIBLE_IDS.get(state["choice"], CREATOR_ID)
-
-        # Создаем задачу
+        # Создаём задачу
         success = create_bitrix_task(
             title=state["choice"],
-            description=description,
-            responsible_id=responsible_id,
+            description=state["buffer_text"].strip(),
+            responsible_id=RESPONSIBLE_IDS.get(state["choice"], CREATOR_ID),
             attached_ids=attached_ids or None
         )
 
-        # Очищаем состояние пользователя
-        clear_user_state(chat_id)
-
-        # Отправляем результат пользователю
-        bot.edit_message_reply_markup(chat_id, call.message.message_id, reply_markup=None)
-        
+        user_state.pop(chat_id, None)
         if success:
-            bot.send_message(
-                chat_id,
-                "✅ Задача успешно создана в Bitrix24!",
-                reply_markup=create_menu_keyboard()
-            )
+            bot.send_message(chat_id, "✅ Задача создана!", reply_markup=create_menu_keyboard())
         else:
-            bot.send_message(
-                chat_id,
-                "❌ Не удалось создать задачу. Пожалуйста, попробуйте позже.",
-                reply_markup=create_menu_keyboard()
-            )
+            bot.send_message(chat_id, "❌ Ошибка создания задачи", reply_markup=create_menu_keyboard())
 
-# --------------- запуск ----------------
-def run_bot() -> None:
-    """Запускает бота в режиме polling."""
+def run_bot():
     logger.info("Starting bot...")
-    bot.delete_webhook()
-
     while True:
         try:
-            bot.infinity_polling(
-                long_polling_timeout=25,
-                timeout=10,
-                skip_pending=True
-            )
+            bot.infinity_polling()
         except Exception as e:
-            logger.error(f"Polling crashed: {e}")
+            logger.error(f"Bot error: {e}")
             time.sleep(5)
 
 @app.route("/")
-def index() -> str:
-    """Обработчик для веб-сервера Flask."""
-    return "Telegram bot is running!"
+def index():
+    return "Bot is running!"
 
 if __name__ == "__main__":
-    # Запускаем бота в отдельном потоке
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-
-    # Запускаем Flask-сервер
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    threading.Thread(target=run_bot, daemon=True).start()
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
