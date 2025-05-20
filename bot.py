@@ -15,12 +15,15 @@ load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
-CREATOR_ID = 12  # ID постановщика задачи в Битрикс24
+CREATOR_ID = 12  # ID постановщика задачи в Битrix24
+
+STORAGE_ID = 11
+PARENT_ID = 5636  # Папка "Загруженные файлы" на общем диске Bitrix24
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# ---------------- вспом-функции ----------------
+# ---------------- вспомогательные функции ----------------
 def add_workdays(start_date: datetime, workdays: int) -> datetime:
     cur = start_date
     added = 0
@@ -31,6 +34,7 @@ def add_workdays(start_date: datetime, workdays: int) -> datetime:
     return cur
 
 def file_link(message) -> str:
+    """Получить ссылку на файл Telegram для предварительного просмотра."""
     try:
         if message.content_type == "photo":
             file_id = message.photo[-1].file_id
@@ -42,26 +46,73 @@ def file_link(message) -> str:
             print(f"[file_link] Unsupported content type: {message.content_type}")
             return ""
 
-        print(f"[file_link] file_id = {file_id}")
         info = bot.get_file(file_id)
-        print(f"[file_link] file_path = {info.file_path}")
         return f"https://api.telegram.org/file/bot{TOKEN}/{info.file_path}"
 
     except Exception as e:
         print(f"[file_link] Error: {e}")
         return ""
 
-def create_bitrix_task(title: str, description: str, responsible_id: int) -> bool:
+def upload_file_to_bitrix(file_url: str, folder_id=PARENT_ID) -> int:
+    """
+    Загрузить файл из URL в Bitrix24 в папку с folder_id.
+    Вернуть attachedId (ID прикрепленного объекта) или None.
+    """
+    try:
+        # Скачиваем файл временно
+        local_filename = file_url.split('/')[-1].split('?')[0]
+        resp = requests.get(file_url, stream=True, timeout=30)
+        resp.raise_for_status()
+
+        with open(local_filename, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        # Загружаем файл в Bitrix24
+        with open(local_filename, 'rb') as f:
+            files = {'file': f}
+            data = {'id': folder_id}
+            upload_url = BITRIX_WEBHOOK_URL.replace('task.item.add.json', 'disk.folder.uploadfile.json')
+            response = requests.post(upload_url, data=data, files=files, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            if 'result' in result:
+                attached_id = result['result']['attachedId']
+            else:
+                print(f"[upload_file_to_bitrix] Ошибка в ответе Bitrix24: {result}")
+                attached_id = None
+
+        os.remove(local_filename)
+        return attached_id
+
+    except Exception as e:
+        print(f"[upload_file_to_bitrix] Ошибка загрузки файла: {e}")
+        try:
+            os.remove(local_filename)
+        except Exception:
+            pass
+        return None
+
+def create_bitrix_task(title: str, description: str, responsible_id: int, attached_ids=None) -> bool:
+    """
+    Создать задачу в Bitrix24 с текстом, ответственным и прикрепленными файлами.
+    attached_ids — список ID прикрепленных файлов в Bitrix24.
+    """
     deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')
-    payload = {
-        "fields": {
-            "TITLE": title,
-            "DESCRIPTION": description,
-            "RESPONSIBLE_ID": responsible_id,
-            "CREATED_BY": CREATOR_ID,
-            "DEADLINE": deadline
-        }
+    fields = {
+        "TITLE": title,
+        "DESCRIPTION": description,
+        "RESPONSIBLE_ID": responsible_id,
+        "CREATED_BY": CREATOR_ID,
+        "DEADLINE": deadline
     }
+    if attached_ids:
+        # Формируем массив для "UF_AUTO_****" или "UF_TASK_WEBDAV_FILES"
+        # В Bitrix24 для задач файлы прикрепляются в поле UF_TASK_WEBDAV_FILES
+        fields["UF_TASK_WEBDAV_FILES"] = attached_ids
+
+    payload = {"fields": fields}
+
     try:
         resp = requests.post(BITRIX_WEBHOOK_URL, json=payload, timeout=15)
         if resp.status_code == 200:
@@ -190,12 +241,19 @@ def inline_buttons(call):
                        f"{call.from_user.last_name or ''}".strip())
 
         description = f"Автор: {author}\n\n{st['buffer_text'].strip()}"
-        if st["buffer_files"]:
-            description += ("\n\nСсылки на файлы:\n" +
-                            "\n".join(st["buffer_files"]))
+
+        # Загружаем файлы в Bitrix24 и собираем attachedId
+        attached_ids = []
+        for file_url in st["buffer_files"]:
+            attached_id = upload_file_to_bitrix(file_url)
+            if attached_id:
+                attached_ids.append(attached_id)
+            else:
+                print(f"Не удалось загрузить файл: {file_url}")
 
         resp_id = 270 if st["choice"] in ["Вопрос 1", "Вопрос 3"] else 12
-        success = create_bitrix_task(st["choice"], description, resp_id)
+
+        success = create_bitrix_task(st["choice"], description, resp_id, attached_ids)
 
         bot.edit_message_reply_markup(chat, call.message.message_id, reply_markup=None)
         bot.send_message(chat,
