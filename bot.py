@@ -30,47 +30,45 @@ def add_workdays(start_date: datetime, workdays: int) -> datetime:
             added += 1
     return cur
 
-def download_file(file_id):
-    file_info = bot.get_file(file_id)
-    file_path = file_info.file_path
-    url = f"https://api.telegram.org/file/bot{TOKEN}/{file_path}"
-    local_filename = file_path.split('/')[-1]
-    r = requests.get(url)
-    with open(local_filename, 'wb') as f:
-        f.write(r.content)
-    return local_filename
+def file_link(message) -> str:
+    try:
+        if message.content_type == "photo":
+            file_id = message.photo[-1].file_id
+        elif message.content_type == "video":
+            file_id = message.video.file_id
+        elif message.content_type == "document":
+            file_id = message.document.file_id
+        else:
+            print(f"[file_link] Unsupported content type: {message.content_type}")
+            return ""
 
-def upload_to_bitrix_disk(file_path):
-    url = BITRIX_WEBHOOK_URL.replace('task.item.add', 'disk.folder.uploadfile')
-    folder_id = 1  # корневая папка (можно задать другую)
+        print(f"[file_link] file_id = {file_id}")
+        info = bot.get_file(file_id)
+        print(f"[file_link] file_path = {info.file_path}")
+        return f"https://api.telegram.org/file/bot{TOKEN}/{info.file_path}"
 
-    with open(file_path, 'rb') as f:
-        files = {'file': (file_path, f)}
-        data = {'id': folder_id, 'generateUniqueName': 'Y'}
-        response = requests.post(url, data=data, files=files)
+    except Exception as e:
+        print(f"[file_link] Error: {e}")
+        return ""
 
-    if response.status_code == 200 and 'result' in response.json():
-        return response.json()['result']['ID']
-    print("Upload error:", response.text)
-    return None
-
-def create_bitrix_task(title: str, description: str, responsible_id: int, file_ids=None) -> bool:
+def create_bitrix_task(title: str, description: str, responsible_id: int) -> bool:
     deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')
-    fields = {
-        "TITLE": title,
-        "DESCRIPTION": description,
-        "RESPONSIBLE_ID": responsible_id,
-        "CREATED_BY": CREATOR_ID,
-        "DEADLINE": deadline
+    payload = {
+        "fields": {
+            "TITLE": title,
+            "DESCRIPTION": description,
+            "RESPONSIBLE_ID": responsible_id,
+            "CREATED_BY": CREATOR_ID,
+            "DEADLINE": deadline
+        }
     }
-    if file_ids:
-        fields["UF_TASK_WEBDAV_FILES"] = file_ids
-
-    payload = {"fields": fields}
-    resp = requests.post(BITRIX_WEBHOOK_URL, json=payload, timeout=15)
-    if resp.status_code == 200:
-        return True
-    print("Bitrix24 error:", resp.text)
+    try:
+        resp = requests.post(BITRIX_WEBHOOK_URL, json=payload, timeout=15)
+        if resp.status_code == 200:
+            return True
+        print("Bitrix24 error:", resp.text)
+    except Exception as e:
+        print("Bitrix24 request error:", e)
     return False
 
 # ---------------- клавиатуры ----------------
@@ -89,7 +87,7 @@ def finish_kb() -> InlineKeyboardMarkup:
     return kb
 
 # ----------- состояния пользователей ----------
-user_state = {}  # chat_id → {choice, buffer_text, file_ids}
+user_state = {}  # chat_id → {choice, buffer_text, buffer_files}
 
 # --------------- хэндлеры ----------------
 @bot.message_handler(commands=['start'])
@@ -104,7 +102,7 @@ def handle_menu(message):
     chat = message.chat.id
     user_state[chat] = {"choice": message.text,
                         "buffer_text": "",
-                        "file_ids": []}
+                        "buffer_files": []}
     bot.send_message(chat,
                      f"Вы выбрали: <b>{message.text}</b>\n"
                      "Пришлите текст или файлы. Когда закончите — нажмите «✅ Подтвердить».",
@@ -120,27 +118,15 @@ def collect_input(message):
     if message.content_type == 'text':
         st["buffer_text"] += message.text + "\n"
     else:
-        try:
-            file_id = None
-            if message.content_type == "photo":
-                file_id = message.photo[-1].file_id
-            elif message.content_type == "video":
-                file_id = message.video.file_id
-            elif message.content_type == "document":
-                file_id = message.document.file_id
-
-            if file_id:
-                local_file = download_file(file_id)
-                file_disk_id = upload_to_bitrix_disk(local_file)
-                if file_disk_id:
-                    st["file_ids"].append(file_disk_id)
-                os.remove(local_file)
-        except Exception as e:
-            print("File processing error:", e)
+        link = file_link(message)
+        if link:
+            st["buffer_files"].append(link)
+        else:
+            print(f"[collect_input] Не удалось получить ссылку на файл от {message.content_type}")
 
     preview = st["buffer_text"].strip() or "(без текста)"
     bot.send_message(chat,
-                     f"Черновик:\n{preview}\n\nФайлов: {len(st['file_ids'])}",
+                     f"Черновик:\n{preview}\n\nФайлов: {len(st['buffer_files'])}",
                      reply_markup=finish_kb())
 
 @bot.callback_query_handler(func=lambda c: c.data in ["ok", "back"])
@@ -165,8 +151,12 @@ def inline_buttons(call):
                        f"{call.from_user.last_name or ''}".strip())
 
         description = f"Автор: {author}\n\n{st['buffer_text'].strip()}"
+        if st["buffer_files"]:
+            description += ("\n\nСсылки на файлы:\n" +
+                            "\n".join(st["buffer_files"]))
+
         resp_id = 270 if st["choice"] in ["Вопрос 1", "Вопрос 3"] else 12
-        success = create_bitrix_task(st["choice"], description, resp_id, st["file_ids"])
+        success = create_bitrix_task(st["choice"], description, resp_id)
 
         bot.edit_message_reply_markup(chat, call.message.message_id,
                                       reply_markup=None)
@@ -178,6 +168,7 @@ def inline_buttons(call):
 # --------------- запуск ----------------
 def run_bot():
     bot.delete_webhook()
+
     while True:
         try:
             bot.infinity_polling(
