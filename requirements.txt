@@ -1,4 +1,4 @@
 pyTelegramBotAPI
-flask
-python-dotenv
+Flask
 requests
+python-dotenv
