@@ -13,7 +13,7 @@ from telebot.types import (
 import requests
 from dotenv import load_dotenv
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -31,12 +31,12 @@ BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
 if not BITRIX_WEBHOOK_URL:
     raise ValueError("Не задан BITRIX_WEBHOOK_URL")
 
-WEBHOOK_HOST = "https://telegram-bitrix-bot.onrender.com"  # Ваш URL на Render
+WEBHOOK_HOST = "https://telegram-bitrix-bot.onrender.com"
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-CREATOR_ID = 12  # ID постановщика задач в Bitrix24
-PARENT_ID = 5636  # ID папки для загрузки файлов
+CREATOR_ID = 12
+PARENT_ID = 5636
 
 RESPONSIBLE_IDS = {
     "Вопрос 1": 270,
@@ -45,30 +45,25 @@ RESPONSIBLE_IDS = {
     "Другое": 12
 }
 
-# Инициализация бота и приложения
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
 app = Flask(__name__)
 
-# Типы для аннотаций
 UserState = Dict[str, Union[str, List[str]]]
 StatesDict = Dict[int, UserState]
 
-# Состояния пользователей
 user_state: StatesDict = {}
 last_callback_time: Dict[int, float] = {}
 
 def add_workdays(start_date: datetime, workdays: int) -> datetime:
-    """Добавляет рабочие дни к дате"""
     cur = start_date
     added = 0
     while added < workdays:
         cur += timedelta(days=1)
-        if cur.weekday() < 5:  # Пн-Пт
+        if cur.weekday() < 5:
             added += 1
     return cur
 
 def file_link(message: Message) -> Optional[str]:
-    """Получает ссылку на файл из сообщения"""
     try:
         if message.content_type == "photo":
             file_id = message.photo[-1].file_id
@@ -87,37 +82,35 @@ def file_link(message: Message) -> Optional[str]:
         return None
 
 def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional[int]:
-    """Загружает файл в Bitrix24 и возвращает ID"""
     local_filename = None
     try:
-        # Скачивание файла
         local_filename = file_url.split('/')[-1].split('?')[0]
+
         with requests.get(file_url, stream=True, timeout=30) as resp:
             resp.raise_for_status()
             with open(local_filename, 'wb') as f:
                 for chunk in resp.iter_content(chunk_size=8192):
                     f.write(chunk)
 
-        # Загрузка в Bitrix24
         upload_url = BITRIX_WEBHOOK_URL.replace('task.item.add.json', 'disk.folder.uploadfile.json')
-        
         with open(local_filename, 'rb') as f:
             files = {'file': (os.path.basename(local_filename), f)}
             data = {'id': folder_id}
-            
             response = requests.post(upload_url, data=data, files=files, timeout=30)
             response.raise_for_status()
             result = response.json()
-            
-            logger.info(f"Ответ Bitrix24: {result}")
+            logger.info(f"Bitrix upload result: {result}")
 
-            # Обработка разных форматов ответа
-            if 'result' in result:
-                r = result['result']
-                if isinstance(r, dict):
-                    return r.get('attachedId') or r.get('ID') or (r.get('ATTACHED_OBJECT') or {}).get('ID')
-            
-            logger.error(f"Не найден ID файла в ответе: {result}")
+            r = result.get('result')
+            if isinstance(r, dict):
+                if 'attachedId' in r:
+                    return int(r['attachedId'])
+                if 'ID' in r:
+                    return int(r['ID'])
+                if isinstance(r.get('ATTACHED_OBJECT'), dict):
+                    return int(r['ATTACHED_OBJECT'].get('ID', 0)) or None
+
+            logger.warning(f"Не удалось извлечь ID файла из ответа: {r}")
             return None
 
     except Exception as e:
@@ -132,7 +125,6 @@ def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional
 
 def create_bitrix_task(title: str, description: str, responsible_id: int, 
                      attached_ids: Optional[List[int]] = None) -> bool:
-    """Создает задачу в Bitrix24"""
     deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')
     fields = {
         "TITLE": title,
@@ -160,7 +152,6 @@ def create_bitrix_task(title: str, description: str, responsible_id: int,
         return False
 
 def create_menu_keyboard() -> ReplyKeyboardMarkup:
-    """Создает клавиатуру меню"""
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     kb.add(
         KeyboardButton("Вопрос 1"),
@@ -171,7 +162,6 @@ def create_menu_keyboard() -> ReplyKeyboardMarkup:
     return kb
 
 def create_finish_keyboard() -> InlineKeyboardMarkup:
-    """Создает инлайн-клавиатуру для завершения"""
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(
         InlineKeyboardButton("✅ Подтвердить", callback_data="ok"),
@@ -182,7 +172,6 @@ def create_finish_keyboard() -> InlineKeyboardMarkup:
     return kb
 
 def is_throttled(chat_id: int, delay_sec: float = 1.5) -> bool:
-    """Защита от частых нажатий"""
     now = time.time()
     last_time = last_callback_time.get(chat_id, 0)
     if now - last_time < delay_sec:
@@ -190,10 +179,8 @@ def is_throttled(chat_id: int, delay_sec: float = 1.5) -> bool:
     last_callback_time[chat_id] = now
     return False
 
-# Обработчики команд
 @bot.message_handler(commands=['start', 'help'])
 def cmd_start(message: Message):
-    """Обработчик команд /start и /help"""
     bot.send_message(
         message.chat.id,
         "Привет! Я бот для создания задач в Bitrix24. Выберите тип вопроса:",
@@ -202,7 +189,6 @@ def cmd_start(message: Message):
 
 @bot.message_handler(func=lambda m: m.text in RESPONSIBLE_IDS.keys())
 def handle_menu(message: Message):
-    """Обработчик выбора пункта меню"""
     chat_id = message.chat.id
     user_state[chat_id] = {
         "choice": message.text,
@@ -217,7 +203,6 @@ def handle_menu(message: Message):
 
 @bot.message_handler(content_types=['text', 'photo', 'document', 'video'])
 def collect_input(message: Message):
-    """Сбор ввода пользователя"""
     chat_id = message.chat.id
     if chat_id not in user_state:
         return
@@ -239,7 +224,6 @@ def collect_input(message: Message):
 
 @bot.callback_query_handler(func=lambda c: c.data in ["ok", "back", "delete_last_file", "cancel"])
 def handle_callbacks(call: CallbackQuery):
-    """Обработчик inline-кнопок"""
     chat_id = call.message.chat.id
     data = call.data
 
@@ -266,7 +250,6 @@ def handle_callbacks(call: CallbackQuery):
             bot.answer_callback_query(call.id, "Добавьте текст или файлы")
             return
 
-        # Загрузка файлов
         attached_ids = []
         for file_url in state["buffer_files"]:
             file_id = upload_file_to_bitrix(file_url)
@@ -275,7 +258,6 @@ def handle_callbacks(call: CallbackQuery):
             else:
                 logger.warning(f"Ошибка загрузки файла: {file_url}")
 
-        # Создание задачи
         success = create_bitrix_task(
             title=state["choice"],
             description=state["buffer_text"].strip(),
@@ -289,7 +271,7 @@ def handle_callbacks(call: CallbackQuery):
         else:
             bot.send_message(chat_id, "❌ Ошибка создания задачи", reply_markup=create_menu_keyboard())
 
-# Вебхук
+# Webhook endpoints
 @app.route(WEBHOOK_PATH, methods=['POST'])
 def telegram_webhook():
     if request.headers.get('content-type') == 'application/json':
@@ -303,7 +285,6 @@ def index():
     return 'Telegram Bot is running!'
 
 def set_webhook():
-    """Установка вебхука"""
     bot.remove_webhook()
     time.sleep(1)
     bot.set_webhook(url=WEBHOOK_URL)
