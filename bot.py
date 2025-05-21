@@ -4,6 +4,7 @@ import requests
 import time
 import random
 import shutil
+from typing import Optional  # <-- вот это добавляем
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
