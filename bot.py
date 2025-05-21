@@ -143,7 +143,7 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user_data[chat_id]["files"].append(file_path)
         await update.message.reply_text(
-            f"📎 Файл получен. Всего файлов: {len(user_data[chat_id]['files']}"
+            f"📎 Файл получен. Всего файлов: {len(user_data[chat_id]['files'])}"
         )
         logger.info(f"Файл сохранен: {file_path}")
 
