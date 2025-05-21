@@ -4,24 +4,38 @@ import requests
 from flask import Flask, request
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+    ApplicationBuilder,
+    ContextTypes,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
 )
 from dotenv import load_dotenv
+import asyncio
 
 load_dotenv()
 
+# Конфигурация
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_TASK = os.getenv("BITRIX_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 BITRIX_UPLOAD_URL = BITRIX_WEBHOOK_TASK.replace('task.item.add.json', 'disk.folder.uploadfile.json')
 BITRIX_FOLDER_ID = 5636
 
+# Инициализация
+bot = Bot(token=TOKEN)
+app = Flask(__name__)
+application = ApplicationBuilder().token(TOKEN).build()
+
+# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
+# Хранение данных пользователей
 user_data = {}
 
 CATEGORY_MAP = {
@@ -31,10 +45,6 @@ CATEGORY_MAP = {
     "Другое": 12
 }
 
-bot = Bot(token=TOKEN)
-app = Flask(__name__)
-
-# Обработчики теперь должны быть async, а context — ContextTypes.DEFAULT_TYPE
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(k, callback_data=k)] for k in CATEGORY_MAP]
@@ -42,14 +52,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Выберите категорию:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    user_data[update.effective_chat.id] = {"files": [], "text": "", "category": None}
+    user_data[update.message.chat_id] = {"files": [], "text": "", "category": None}
+
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    chat_id = query.message.chat_id
 
     if query.data in CATEGORY_MAP:
-        user_data[query.message.chat.id]["category"] = query.data
+        user_data[chat_id]["category"] = query.data
         await query.edit_message_text(
             f"Категория: {query.data}\nОтправьте описание и/или файлы."
         )
@@ -60,8 +72,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "remove_last":
         await remove_last_file(update, context)
 
+
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = update.message.chat_id
     if chat_id not in user_data:
         await start(update, context)
         return
@@ -69,8 +82,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data[chat_id]["text"] = update.message.text
     await show_preview(update, chat_id)
 
+
 async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+    chat_id = update.message.chat_id
     if chat_id not in user_data:
         await start(update, context)
         return
@@ -88,13 +102,15 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        file_path = f"tmp_{chat_id}_{file.file_id}"
-        await file.get_file().download_to_drive(file_path)
+        file_path = f"downloads/tmp_{chat_id}_{file.file_id}"
+        tg_file = await file.get_file()
+        await tg_file.download_to_drive(file_path)
         user_data[chat_id]["files"].append(file_path)
         await update.message.reply_text(f"Файл получен. Всего: {len(user_data[chat_id]['files'])}")
     except Exception as e:
         logger.error(f"Ошибка загрузки файла: {e}")
         await update.message.reply_text("Ошибка обработки файла.")
+
 
 async def show_preview(update, chat_id):
     data = user_data[chat_id]
@@ -112,9 +128,10 @@ async def show_preview(update, chat_id):
     else:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+
 async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
+    chat_id = query.message.chat_id
     data = user_data.get(chat_id)
 
     if not data or not data["category"]:
@@ -153,6 +170,7 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_data.pop(chat_id, None)
 
+
 def upload_to_bitrix(file_path):
     try:
         with open(file_path, 'rb') as f:
@@ -169,9 +187,10 @@ def upload_to_bitrix(file_path):
         logger.error(f"Ошибка загрузки в Bitrix: {e}")
         return None
 
+
 async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
+    chat_id = query.message.chat_id
 
     if chat_id in user_data:
         for file_path in user_data[chat_id]["files"]:
@@ -184,9 +203,10 @@ async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.edit_message_text("Создание задачи отменено.")
 
+
 async def remove_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat.id
+    chat_id = query.message.chat_id
 
     if chat_id in user_data and user_data[chat_id]["files"]:
         last_file = user_data[chat_id]["files"].pop()
@@ -199,31 +219,29 @@ async def remove_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.answer("Нет файлов для удаления")
 
+
+# Flask webhook
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(), bot)
-    # Для async нужно использовать loop.run_until_complete
-    import asyncio
-    asyncio.get_event_loop().run_until_complete(application.process_update(update))
+    update = Update.de_json(request.get_json(force=True), bot)
+    asyncio.run(application.process_update(update))
     return "ok"
+
 
 @app.route("/")
 def index():
     return "Telegram Bot is running!"
 
+
+# Регистрация хендлеров
+application.add_handler(CommandHandler("start", start))
+application.add_handler(CallbackQueryHandler(button_handler))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
+
+
 if __name__ == "__main__":
-    import asyncio
-
     os.makedirs("downloads", exist_ok=True)
-
-    application = ApplicationBuilder().token(TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
-
     bot.delete_webhook()
     bot.set_webhook(url=f"https://telegram-bitrix-bot.onrender.com/webhook/{TOKEN}")
-
-    # Запускаем Flask
     app.run(host="0.0.0.0", port=PORT)
