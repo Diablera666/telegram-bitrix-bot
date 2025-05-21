@@ -1,18 +1,14 @@
 import os
 import logging
 import requests
+import asyncio
 from flask import Flask, request
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ContextTypes, filters
 )
 from dotenv import load_dotenv
-import asyncio
 
 load_dotenv()
 
@@ -21,12 +17,7 @@ TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_TASK = os.getenv("BITRIX_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 BITRIX_UPLOAD_URL = BITRIX_WEBHOOK_TASK.replace('task.item.add.json', 'disk.folder.uploadfile.json')
-BITRIX_FOLDER_ID = 5636
-
-# Инициализация
-bot = Bot(token=TOKEN)
-app = Flask(__name__)
-application = ApplicationBuilder().token(TOKEN).build()
+BITRIX_FOLDER_ID = 5636  # ID папки в Bitrix для файлов
 
 # Логирование
 logging.basicConfig(
@@ -35,7 +26,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Хранение данных пользователей
+# Flask
+app = Flask(__name__)
+
+# Telegram bot и Application
+bot = Bot(token=TOKEN)
+application = Application.builder().token(TOKEN).build()
+
+# Данные пользователей
 user_data = {}
 
 CATEGORY_MAP = {
@@ -103,8 +101,8 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         file_path = f"downloads/tmp_{chat_id}_{file.file_id}"
-        tg_file = await file.get_file()
-        await tg_file.download_to_drive(file_path)
+        new_file = await file.get_file()
+        await new_file.download_to_drive(file_path)
         user_data[chat_id]["files"].append(file_path)
         await update.message.reply_text(f"Файл получен. Всего: {len(user_data[chat_id]['files'])}")
     except Exception as e:
@@ -112,7 +110,7 @@ async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Ошибка обработки файла.")
 
 
-async def show_preview(update, chat_id):
+async def show_preview(update: Update, chat_id):
     data = user_data[chat_id]
     text = f"Категория: {data['category']}\nОписание: {data['text']}\nФайлов: {len(data['files'])}"
 
@@ -123,7 +121,7 @@ async def show_preview(update, chat_id):
     if data["files"]:
         keyboard.append([InlineKeyboardButton("🗑 Удалить последний файл", callback_data="remove_last")])
 
-    if hasattr(update, 'message'):
+    if hasattr(update, 'message') and update.message:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -138,6 +136,7 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ошибка: нет данных задачи")
         return
 
+    # Загрузка файлов
     file_ids = []
     for file_path in data["files"]:
         try:
@@ -148,6 +147,7 @@ async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.error(f"Ошибка загрузки файла {file_path}: {e}")
 
+    # Создание задачи
     task_data = {
         "fields": {
             "TITLE": f"Запрос из Telegram: {data['category']}",
@@ -181,7 +181,6 @@ def upload_to_bitrix(file_path):
                 timeout=30
             )
             result = response.json()
-            logger.info(f"Upload response: {result}")
             return result.get('result', {}).get('ID')
     except Exception as e:
         logger.error(f"Ошибка загрузки в Bitrix: {e}")
@@ -220,11 +219,14 @@ async def remove_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Нет файлов для удаления")
 
 
-# Flask webhook
+# Webhook endpoint
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
+    async def handle():
+        update = Update.de_json(request.get_json(force=True), bot)
+        await application.initialize()
+        await application.process_update(update)
+    asyncio.run(handle())
     return "ok"
 
 
@@ -233,15 +235,18 @@ def index():
     return "Telegram Bot is running!"
 
 
-# Регистрация хендлеров
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
-
-
 if __name__ == "__main__":
     os.makedirs("downloads", exist_ok=True)
-    bot.delete_webhook()
-    bot.set_webhook(url=f"https://telegram-bitrix-bot.onrender.com/webhook/{TOKEN}")
+
+    # Устанавливаем webhook
+    asyncio.run(application.bot.delete_webhook())
+    asyncio.run(application.bot.set_webhook(url=f"https://telegram-bitrix-bot.onrender.com/webhook/{TOKEN}"))
+
+    # Регистрируем хендлеры
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
+
+    # Запускаем Flask
     app.run(host="0.0.0.0", port=PORT)
