@@ -2,39 +2,28 @@ import os
 import logging
 import requests
 from flask import Flask, request
-from telegram import (
-    Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
-)
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Dispatcher, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
 )
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Конфигурация
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK_TASK = os.getenv("BITRIX_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 BITRIX_UPLOAD_URL = BITRIX_WEBHOOK_TASK.replace('task.item.add.json', 'disk.folder.uploadfile.json')
-BITRIX_FOLDER_ID = 5636  # ID папки для загрузки
+BITRIX_FOLDER_ID = 5636
 
-# Инициализация
-bot = Bot(token=TOKEN)
-app = Flask(__name__)
-dispatcher = Dispatcher(bot, None, workers=0)
-
-# Логирование
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Хранение данных пользователей
 user_data = {}
 
-# Соответствие категорий и ответственных
 CATEGORY_MAP = {
     "Вопрос 1": 270,
     "Вопрос 2": 12,
@@ -42,47 +31,48 @@ CATEGORY_MAP = {
     "Другое": 12
 }
 
-def start(update: Update, context):
-    """Обработка команды /start"""
+bot = Bot(token=TOKEN)
+app = Flask(__name__)
+
+# Обработчики теперь должны быть async, а context — ContextTypes.DEFAULT_TYPE
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(k, callback_data=k)] for k in CATEGORY_MAP]
-    update.message.reply_text(
+    await update.message.reply_text(
         "Выберите категорию:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
-    user_data[update.message.chat_id] = {"files": [], "text": "", "category": None}
+    user_data[update.effective_chat.id] = {"files": [], "text": "", "category": None}
 
-def button_handler(update: Update, context):
-    """Обработка выбора категории"""
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    query.answer()
-    
+    await query.answer()
+
     if query.data in CATEGORY_MAP:
-        user_data[query.message.chat_id]["category"] = query.data
-        query.edit_message_text(
+        user_data[query.message.chat.id]["category"] = query.data
+        await query.edit_message_text(
             f"Категория: {query.data}\nОтправьте описание и/или файлы."
         )
     elif query.data == "confirm":
-        confirm_task(update, context)
+        await confirm_task(update, context)
     elif query.data == "cancel":
-        cancel_task(update, context)
+        await cancel_task(update, context)
     elif query.data == "remove_last":
-        remove_last_file(update, context)
+        await remove_last_file(update, context)
 
-def text_handler(update: Update, context):
-    """Обработка текстового сообщения"""
-    chat_id = update.message.chat_id
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     if chat_id not in user_data:
-        start(update, context)
+        await start(update, context)
         return
-    
-    user_data[chat_id]["text"] = update.message.text
-    show_preview(update, chat_id)
 
-def file_handler(update: Update, context):
-    """Обработка файлов"""
-    chat_id = update.message.chat_id
+    user_data[chat_id]["text"] = update.message.text
+    await show_preview(update, chat_id)
+
+async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
     if chat_id not in user_data:
-        start(update, context)
+        await start(update, context)
         return
 
     file = None
@@ -94,46 +84,43 @@ def file_handler(update: Update, context):
         file = update.message.video
 
     if not file:
-        update.message.reply_text("Формат файла не поддерживается.")
+        await update.message.reply_text("Формат файла не поддерживается.")
         return
 
     try:
         file_path = f"tmp_{chat_id}_{file.file_id}"
-        file.get_file().download(file_path)
+        await file.get_file().download_to_drive(file_path)
         user_data[chat_id]["files"].append(file_path)
-        update.message.reply_text(f"Файл получен. Всего: {len(user_data[chat_id]['files'])}")
+        await update.message.reply_text(f"Файл получен. Всего: {len(user_data[chat_id]['files'])}")
     except Exception as e:
         logger.error(f"Ошибка загрузки файла: {e}")
-        update.message.reply_text("Ошибка обработки файла.")
+        await update.message.reply_text("Ошибка обработки файла.")
 
-def show_preview(update, chat_id):
-    """Показ превью задачи"""
+async def show_preview(update, chat_id):
     data = user_data[chat_id]
     text = f"Категория: {data['category']}\nОписание: {data['text']}\nФайлов: {len(data['files'])}"
-    
+
     keyboard = [
         [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")],
         [InlineKeyboardButton("❌ Отмена", callback_data="cancel")]
     ]
     if data["files"]:
         keyboard.append([InlineKeyboardButton("🗑 Удалить последний файл", callback_data="remove_last")])
-    
-    if hasattr(update, 'message'):
-        update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    else:
-        update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
-def confirm_task(update: Update, context):
-    """Создание задачи в Bitrix24"""
+    if hasattr(update, 'message'):
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def confirm_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
+    chat_id = query.message.chat.id
     data = user_data.get(chat_id)
-    
+
     if not data or not data["category"]:
-        query.edit_message_text("Ошибка: нет данных задачи")
+        await query.edit_message_text("Ошибка: нет данных задачи")
         return
 
-    # Загрузка файлов
     file_ids = []
     for file_path in data["files"]:
         try:
@@ -144,7 +131,6 @@ def confirm_task(update: Update, context):
         except Exception as e:
             logger.error(f"Ошибка загрузки файла {file_path}: {e}")
 
-    # Создание задачи
     task_data = {
         "fields": {
             "TITLE": f"Запрос из Telegram: {data['category']}",
@@ -157,18 +143,17 @@ def confirm_task(update: Update, context):
     try:
         response = requests.post(BITRIX_WEBHOOK_TASK, json=task_data, timeout=10)
         if response.status_code == 200:
-            query.edit_message_text("✅ Задача успешно создана!")
+            await query.edit_message_text("✅ Задача успешно создана!")
         else:
             logger.error(f"Ошибка Bitrix: {response.text}")
-            query.edit_message_text("❌ Ошибка при создании задачи")
+            await query.edit_message_text("❌ Ошибка при создании задачи")
     except Exception as e:
         logger.error(f"Ошибка запроса: {e}")
-        query.edit_message_text("⚠️ Ошибка соединения с Bitrix24")
+        await query.edit_message_text("⚠️ Ошибка соединения с Bitrix24")
 
     user_data.pop(chat_id, None)
 
 def upload_to_bitrix(file_path):
-    """Загрузка файла на диск Bitrix24"""
     try:
         with open(file_path, 'rb') as f:
             response = requests.post(
@@ -184,12 +169,10 @@ def upload_to_bitrix(file_path):
         logger.error(f"Ошибка загрузки в Bitrix: {e}")
         return None
 
-def cancel_task(update: Update, context):
-    """Отмена создания задачи"""
+async def cancel_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    
-    # Удаление временных файлов
+    chat_id = query.message.chat.id
+
     if chat_id in user_data:
         for file_path in user_data[chat_id]["files"]:
             try:
@@ -198,14 +181,13 @@ def cancel_task(update: Update, context):
             except:
                 pass
         user_data.pop(chat_id)
-    
-    query.edit_message_text("Создание задачи отменено.")
 
-def remove_last_file(update: Update, context):
-    """Удаление последнего файла"""
+    await query.edit_message_text("Создание задачи отменено.")
+
+async def remove_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    chat_id = query.message.chat_id
-    
+    chat_id = query.message.chat.id
+
     if chat_id in user_data and user_data[chat_id]["files"]:
         last_file = user_data[chat_id]["files"].pop()
         try:
@@ -213,33 +195,35 @@ def remove_last_file(update: Update, context):
                 os.remove(last_file)
         except:
             pass
-        show_preview(update, chat_id)
+        await show_preview(update, chat_id)
     else:
-        query.answer("Нет файлов для удаления")
+        await query.answer("Нет файлов для удаления")
 
-# Вебхук
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(), bot)
-    dispatcher.process_update(update)
+    # Для async нужно использовать loop.run_until_complete
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(application.process_update(update))
     return "ok"
 
 @app.route("/")
 def index():
     return "Telegram Bot is running!"
 
-# Регистрация обработчиков
-dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CallbackQueryHandler(button_handler))
-dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-dispatcher.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
-
 if __name__ == "__main__":
-    # Создаем временную папку
+    import asyncio
+
     os.makedirs("downloads", exist_ok=True)
-    
-    # Установка вебхука
+
+    application = ApplicationBuilder().token(TOKEN).build()
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
+
     bot.delete_webhook()
     bot.set_webhook(url=f"https://telegram-bitrix-bot.onrender.com/webhook/{TOKEN}")
-    
+
+    # Запускаем Flask
     app.run(host="0.0.0.0", port=PORT)
