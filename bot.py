@@ -1,295 +1,179 @@
 import os
-import time
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, Optional, List, Union
-from flask import Flask, request
-import telebot
-from telebot.types import (
-    ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
-    Message, CallbackQuery
-)
 import requests
-from dotenv import load_dotenv
-
-# Логирование
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+from flask import Flask, request
+from telegram import (
+    Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
 )
-logger = logging.getLogger(__name__)
+from telegram.ext import (
+    Dispatcher, CommandHandler, MessageHandler, CallbackQueryHandler, filters, CallbackContext
+)
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# Константы
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-if not TOKEN:
-    raise ValueError("Не задан TELEGRAM_BOT_TOKEN")
+BITRIX_WEBHOOK_TASK = os.getenv("BITRIX_WEBHOOK_URL")
+PORT = int(os.getenv("PORT", 10000))
+BITRIX_UPLOAD_URL = "https://getman.bitrix24.kz/rest/270/1e5vf17l1tn1atcb/disk.folder.uploadfile.json"
+BITRIX_FOLDER_ID = 5636  # ID публичной папки
 
-BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
-if not BITRIX_WEBHOOK_URL:
-    raise ValueError("Не задан BITRIX_WEBHOOK_URL")
+bot = Bot(token=TOKEN)
+app = Flask(__name__)
+dispatcher = Dispatcher(bot, None, workers=0)
 
-WEBHOOK_HOST = "https://telegram-bitrix-bot.onrender.com"
-WEBHOOK_PATH = f"/webhook/{TOKEN}"
-WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 
-CREATOR_ID = 12
-PARENT_ID = 5636
+user_data = {}
 
-RESPONSIBLE_IDS = {
+CATEGORY_MAP = {
     "Вопрос 1": 270,
     "Вопрос 2": 12,
     "Вопрос 3": 270,
     "Другое": 12
 }
 
-bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-app = Flask(__name__)
+def start(update: Update, context: CallbackContext):
+    keyboard = [[InlineKeyboardButton(k, callback_data=k)] for k in CATEGORY_MAP.keys()]
+    update.message.reply_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+    user_data[update.message.chat_id] = {"files": [], "text": "", "category": None}
 
-UserState = Dict[str, Union[str, List[str]]]
-StatesDict = Dict[int, UserState]
+def button(update: Update, context: CallbackContext):
+    query = update.callback_query
+    query.answer()
+    category = query.data
+    user_data[query.message.chat_id]["category"] = category
+    query.edit_message_text(f"Категория: {category}\nВведите описание задачи или отправьте файлы.")
 
-user_state: StatesDict = {}
-last_callback_time: Dict[int, float] = {}
+def text_handler(update: Update, context: CallbackContext):
+    data = user_data.get(update.message.chat_id, {})
+    data["text"] = update.message.text
+    show_confirm_menu(update, context, data)
 
-def add_workdays(start_date: datetime, workdays: int) -> datetime:
-    cur = start_date
-    added = 0
-    while added < workdays:
-        cur += timedelta(days=1)
-        if cur.weekday() < 5:
-            added += 1
-    return cur
+def show_confirm_menu(update, context, data):
+    files_count = len(data["files"])
+    keyboard = [
+        [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")],
+        [InlineKeyboardButton("❌ Отмена", callback_data="cancel")],
+        [InlineKeyboardButton("🗑 Удалить последний файл", callback_data="remove_last")] if files_count else []
+    ]
+    text_preview = f"Описание: {data['text']}\nФайлов: {files_count}"
+    update.message.reply_text(text_preview, reply_markup=InlineKeyboardMarkup(keyboard))
 
-def file_link(message: Message) -> Optional[str]:
-    try:
-        if message.content_type == "photo":
-            file_id = message.photo[-1].file_id
-        elif message.content_type == "video":
-            file_id = message.video.file_id
-        elif message.content_type == "document":
-            file_id = message.document.file_id
-        else:
-            logger.warning(f"Неподдерживаемый тип: {message.content_type}")
-            return None
+def file_handler(update: Update, context: CallbackContext):
+    chat_id = update.message.chat_id
+    file_id = None
 
-        info = bot.get_file(file_id)
-        return f"https://api.telegram.org/file/bot{TOKEN}/{info.file_path}"
-    except Exception as e:
-        logger.error(f"Ошибка получения ссылки: {e}")
-        return None
+    if update.message.document:
+        file_id = update.message.document.file_id
+    elif update.message.photo:
+        file_id = update.message.photo[-1].file_id
+    elif update.message.video:
+        file_id = update.message.video.file_id
 
-def upload_file_to_bitrix(file_url: str, folder_id: int = PARENT_ID) -> Optional[int]:
-    local_filename = None
-    try:
-        local_filename = file_url.split('/')[-1].split('?')[0]
-
-        with requests.get(file_url, stream=True, timeout=30) as resp:
-            resp.raise_for_status()
-            with open(local_filename, 'wb') as f:
-                for chunk in resp.iter_content(chunk_size=8192):
-                    f.write(chunk)
-
-        upload_url = BITRIX_WEBHOOK_URL.replace('task.item.add.json', 'disk.folder.uploadfile.json')
-        with open(local_filename, 'rb') as f:
-            files = {'file': (os.path.basename(local_filename), f)}
-            data = {'id': folder_id}
-            response = requests.post(upload_url, data=data, files=files, timeout=30)
-            response.raise_for_status()
-            result = response.json()
-            logger.info(f"Bitrix upload result: {result}")
-
-            r = result.get('result')
-            if isinstance(r, dict):
-                if 'attachedId' in r:
-                    return int(r['attachedId'])
-                if 'ID' in r:
-                    return int(r['ID'])
-                if isinstance(r.get('ATTACHED_OBJECT'), dict):
-                    return int(r['ATTACHED_OBJECT'].get('ID', 0)) or None
-
-            logger.warning(f"Не удалось извлечь ID файла из ответа: {r}")
-            return None
-
-    except Exception as e:
-        logger.error(f"Ошибка загрузки файла: {e}")
-        return None
-    finally:
-        if local_filename and os.path.exists(local_filename):
-            try:
-                os.remove(local_filename)
-            except Exception as e:
-                logger.error(f"Ошибка удаления файла: {e}")
-
-def create_bitrix_task(title: str, description: str, responsible_id: int, 
-                     attached_ids: Optional[List[int]] = None) -> bool:
-    deadline = add_workdays(datetime.now(), 3).strftime('%Y-%m-%dT%H:%M:%S')
-    fields = {
-        "TITLE": title,
-        "DESCRIPTION": description,
-        "RESPONSIBLE_ID": responsible_id,
-        "CREATED_BY": CREATOR_ID,
-        "DEADLINE": deadline
-    }
-    
-    if attached_ids:
-        fields["UF_TASK_WEBDAV_FILES"] = [str(fid) for fid in attached_ids]
-        logger.info(f"Прикрепляемые файлы: {attached_ids}")
-
-    try:
-        response = requests.post(
-            BITRIX_WEBHOOK_URL,
-            json={"fields": fields},
-            timeout=15
-        )
-        logger.info(f"Ответ создания задачи: {response.status_code}, {response.text}")
-        return response.status_code == 200
-        
-    except Exception as e:
-        logger.error(f"Ошибка создания задачи: {e}")
-        return False
-
-def create_menu_keyboard() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
-    kb.add(
-        KeyboardButton("Вопрос 1"),
-        KeyboardButton("Вопрос 2"),
-        KeyboardButton("Вопрос 3"),
-        KeyboardButton("Другое")
-    )
-    return kb
-
-def create_finish_keyboard() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(
-        InlineKeyboardButton("✅ Подтвердить", callback_data="ok"),
-        InlineKeyboardButton("❌ Отменить", callback_data="cancel"),
-        InlineKeyboardButton("🗑️ Удалить файл", callback_data="delete_last_file"),
-        InlineKeyboardButton("↩️ В меню", callback_data="back")
-    )
-    return kb
-
-def is_throttled(chat_id: int, delay_sec: float = 1.5) -> bool:
-    now = time.time()
-    last_time = last_callback_time.get(chat_id, 0)
-    if now - last_time < delay_sec:
-        return True
-    last_callback_time[chat_id] = now
-    return False
-
-@bot.message_handler(commands=['start', 'help'])
-def cmd_start(message: Message):
-    bot.send_message(
-        message.chat.id,
-        "Привет! Я бот для создания задач в Bitrix24. Выберите тип вопроса:",
-        reply_markup=create_menu_keyboard()
-    )
-
-@bot.message_handler(func=lambda m: m.text in RESPONSIBLE_IDS.keys())
-def handle_menu(message: Message):
-    chat_id = message.chat.id
-    user_state[chat_id] = {
-        "choice": message.text,
-        "buffer_text": "",
-        "buffer_files": []
-    }
-    bot.send_message(
-        chat_id,
-        f"Вы выбрали: <b>{message.text}</b>\nПришлите текст или файлы.",
-        reply_markup=create_finish_keyboard()
-    )
-
-@bot.message_handler(content_types=['text', 'photo', 'document', 'video'])
-def collect_input(message: Message):
-    chat_id = message.chat.id
-    if chat_id not in user_state:
+    if not file_id:
+        update.message.reply_text("Тип файла не поддерживается.")
         return
 
-    state = user_state[chat_id]
-    if message.content_type == 'text':
-        state["buffer_text"] += message.text + "\n"
+    file = bot.get_file(file_id)
+    file_path = f"downloads/{chat_id}_{file_id}"
+    os.makedirs("downloads", exist_ok=True)
+    file.download(file_path)
+
+    user_data[chat_id]["files"].append(file_path)
+    update.message.reply_text(f"Файл добавлен. Всего файлов: {len(user_data[chat_id]['files'])}")
+
+def confirm(update: Update, context: CallbackContext):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    data = user_data.get(chat_id)
+
+    if not data:
+        query.edit_message_text("Нет данных для создания задачи.")
+        return
+
+    bitrix_file_ids = []
+    for path in data["files"]:
+        file_id = upload_file_to_bitrix(path)
+        if file_id:
+            bitrix_file_ids.append(file_id)
+
+    task_data = {
+        "fields": {
+            "TITLE": f"Задача от Telegram ({data['category']})",
+            "RESPONSIBLE_ID": CATEGORY_MAP[data["category"]],
+            "DESCRIPTION": data["text"],
+            "UF_TASK_WEBDAV_FILES": bitrix_file_ids
+        }
+    }
+
+    response = requests.post(BITRIX_WEBHOOK_TASK, json=task_data)
+    logging.info(f"Ответ создания задачи: {response.status_code}, {response.text}")
+    query.edit_message_text("Задача создана.")
+    user_data.pop(chat_id, None)
+
+def upload_file_to_bitrix(filepath):
+    filename = os.path.basename(filepath)
+    step1_payload = {
+        "id": BITRIX_FOLDER_ID,
+        "generateUniqueName": "Y",
+        "name": filename
+    }
+
+    step1 = requests.post(BITRIX_UPLOAD_URL, json=step1_payload)
+    result = step1.json().get("result", {})
+    upload_url = result.get("uploadUrl")
+    if not upload_url:
+        logging.warning(f"Не удалось получить uploadUrl из ответа: {step1.text}")
+        return None
+
+    with open(filepath, "rb") as f:
+        upload_response = requests.post(upload_url, files={"file": f})
+        upload_result = upload_response.json()
+        file_id = upload_result.get("result", {}).get("ID")
+        logging.info(f"Bitrix upload result: {upload_result}")
+        if not file_id:
+            logging.warning(f"Не удалось получить ID файла из ответа: {upload_result}")
+        return file_id
+
+def cancel(update: Update, context: CallbackContext):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    user_data.pop(chat_id, None)
+    query.edit_message_text("Отменено.")
+
+def remove_last_file(update: Update, context: CallbackContext):
+    query = update.callback_query
+    chat_id = query.message.chat_id
+    data = user_data.get(chat_id)
+    if data and data["files"]:
+        removed = data["files"].pop()
+        if os.path.exists(removed):
+            os.remove(removed)
+        query.edit_message_text(f"Удалён последний файл. Осталось: {len(data['files'])}")
     else:
-        link = file_link(message)
-        if link:
-            state["buffer_files"].append(link)
+        query.edit_message_text("Нет файлов для удаления.")
 
-    preview = state["buffer_text"].strip() or "<i>(без текста)</i>"
-    bot.send_message(
-        chat_id,
-        f"Черновик:\n{preview}\nФайлов: {len(state['buffer_files'])}",
-        reply_markup=create_finish_keyboard()
-    )
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "OK"
 
-@bot.callback_query_handler(func=lambda c: c.data in ["ok", "back", "delete_last_file", "cancel"])
-def handle_callbacks(call: CallbackQuery):
-    chat_id = call.message.chat.id
-    data = call.data
-
-    if is_throttled(chat_id):
-        bot.answer_callback_query(call.id, "Подождите...")
-        return
-
-    if data == "back" or data == "cancel":
-        user_state.pop(chat_id, None)
-        bot.send_message(chat_id, "Меню:", reply_markup=create_menu_keyboard())
-
-    elif data == "delete_last_file":
-        if chat_id in user_state and user_state[chat_id]["buffer_files"]:
-            user_state[chat_id]["buffer_files"].pop()
-            bot.answer_callback_query(call.id, "Файл удалён")
-
-    elif data == "ok":
-        if chat_id not in user_state:
-            bot.answer_callback_query(call.id, "Сессия устарела")
-            return
-
-        state = user_state[chat_id]
-        if not state["buffer_text"] and not state["buffer_files"]:
-            bot.answer_callback_query(call.id, "Добавьте текст или файлы")
-            return
-
-        attached_ids = []
-        for file_url in state["buffer_files"]:
-            file_id = upload_file_to_bitrix(file_url)
-            if file_id:
-                attached_ids.append(file_id)
-            else:
-                logger.warning(f"Ошибка загрузки файла: {file_url}")
-
-        success = create_bitrix_task(
-            title=state["choice"],
-            description=state["buffer_text"].strip(),
-            responsible_id=RESPONSIBLE_IDS.get(state["choice"], CREATOR_ID),
-            attached_ids=attached_ids or None
-        )
-
-        user_state.pop(chat_id, None)
-        if success:
-            bot.send_message(chat_id, "✅ Задача создана!", reply_markup=create_menu_keyboard())
-        else:
-            bot.send_message(chat_id, "❌ Ошибка создания задачи", reply_markup=create_menu_keyboard())
-
-# Webhook endpoints
-@app.route(WEBHOOK_PATH, methods=['POST'])
-def telegram_webhook():
-    if request.headers.get('content-type') == 'application/json':
-        update = telebot.types.Update.de_json(request.get_json())
-        bot.process_new_updates([update])
-        return '', 200
-    return 'Invalid content type', 403
-
-@app.route('/')
+@app.route("/", methods=["GET"])
 def index():
-    return 'Telegram Bot is running!'
+    return "Bot is running."
 
-def set_webhook():
-    bot.remove_webhook()
-    time.sleep(1)
-    bot.set_webhook(url=WEBHOOK_URL)
-    logger.info(f"Вебхук установлен: {WEBHOOK_URL}")
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CallbackQueryHandler(confirm, pattern="^confirm$"))
+dispatcher.add_handler(CallbackQueryHandler(cancel, pattern="^cancel$"))
+dispatcher.add_handler(CallbackQueryHandler(remove_last_file, pattern="^remove_last$"))
+dispatcher.add_handler(CallbackQueryHandler(button))
+dispatcher.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+dispatcher.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
 
-if __name__ == '__main__':
-    set_webhook()
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=PORT)
