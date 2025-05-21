@@ -2,11 +2,13 @@ import os
 import logging
 import requests
 import asyncio
-
 from flask import Flask, request
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
+)
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, filters
 )
 from dotenv import load_dotenv
 
@@ -19,7 +21,7 @@ PORT = int(os.getenv("PORT", 10000))
 BITRIX_UPLOAD_URL = BITRIX_WEBHOOK_TASK.replace('task.item.add.json', 'disk.folder.uploadfile.json')
 BITRIX_FOLDER_ID = 5636  # ID папки для загрузки
 
-# Инициализация бота и приложения
+# Инициализация
 bot = Bot(token=TOKEN)
 application = Application.builder().token(TOKEN).build()
 app = Flask(__name__)
@@ -42,8 +44,6 @@ CATEGORY_MAP = {
     "Другое": 12
 }
 
-# Хендлеры
-
 async def start(update: Update, context):
     """Обработка команды /start"""
     keyboard = [[InlineKeyboardButton(k, callback_data=k)] for k in CATEGORY_MAP]
@@ -54,15 +54,13 @@ async def start(update: Update, context):
     user_data[update.effective_chat.id] = {"files": [], "text": "", "category": None}
 
 async def button_handler(update: Update, context):
-    """Обработка выбора категории и кнопок"""
+    """Обработка выбора категории и действий"""
     query = update.callback_query
     await query.answer()
 
     chat_id = query.message.chat.id
-    if chat_id not in user_data:
-        user_data[chat_id] = {"files": [], "text": "", "category": None}
-
     if query.data in CATEGORY_MAP:
+        user_data.setdefault(chat_id, {"files": [], "text": "", "category": None})
         user_data[chat_id]["category"] = query.data
         await query.edit_message_text(
             f"Категория: {query.data}\nОтправьте описание и/или файлы."
@@ -85,7 +83,7 @@ async def text_handler(update: Update, context):
     await show_preview(update, chat_id)
 
 async def file_handler(update: Update, context):
-    """Обработка файлов"""
+    """Обработка файлов (документы, фото, видео)"""
     chat_id = update.effective_chat.id
     if chat_id not in user_data:
         await start(update, context)
@@ -113,7 +111,7 @@ async def file_handler(update: Update, context):
         await update.message.reply_text("Ошибка обработки файла.")
 
 async def show_preview(update, chat_id):
-    """Показ превью задачи"""
+    """Показ превью задачи с кнопками подтверждения"""
     data = user_data[chat_id]
     text = f"Категория: {data['category']}\nОписание: {data['text']}\nФайлов: {len(data['files'])}"
 
@@ -139,6 +137,7 @@ async def confirm_task(update: Update, context):
         await query.edit_message_text("Ошибка: нет данных задачи")
         return
 
+    # Загрузка файлов на Bitrix
     file_ids = []
     for file_path in data["files"]:
         try:
@@ -149,6 +148,7 @@ async def confirm_task(update: Update, context):
         except Exception as e:
             logger.error(f"Ошибка загрузки файла {file_path}: {e}")
 
+    # Создание задачи
     task_data = {
         "fields": {
             "TITLE": f"Запрос из Telegram: {data['category']}",
@@ -172,7 +172,7 @@ async def confirm_task(update: Update, context):
     user_data.pop(chat_id, None)
 
 def upload_to_bitrix(file_path):
-    """Загрузка файла на диск Bitrix24"""
+    """Загрузка файла на диск Bitrix24 (синхронно)"""
     try:
         with open(file_path, 'rb') as f:
             response = requests.post(
@@ -189,7 +189,7 @@ def upload_to_bitrix(file_path):
         return None
 
 async def cancel_task(update: Update, context):
-    """Отмена создания задачи"""
+    """Отмена создания задачи и очистка"""
     query = update.callback_query
     chat_id = query.message.chat.id
 
@@ -205,7 +205,7 @@ async def cancel_task(update: Update, context):
     await query.edit_message_text("Создание задачи отменено.")
 
 async def remove_last_file(update: Update, context):
-    """Удаление последнего файла"""
+    """Удаление последнего загруженного файла"""
     query = update.callback_query
     chat_id = query.message.chat.id
 
@@ -220,7 +220,6 @@ async def remove_last_file(update: Update, context):
     else:
         await query.answer("Нет файлов для удаления")
 
-# Вебхук
 @app.route(f"/webhook/{TOKEN}", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
@@ -242,15 +241,15 @@ def webhook():
 def index():
     return "Telegram Bot is running!"
 
-# Регистрация обработчиков
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(button_handler))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, file_handler))
-
 if __name__ == "__main__":
+    # Создаём папку для временных файлов, если нет
     os.makedirs("downloads", exist_ok=True)
-    # Установка webhook — в реальном деплое убедись, что URL корректный!
+
+    # Инициализируем Application (обязательно!)
+    asyncio.run(application.initialize())
+
+    # Устанавливаем вебхук
     bot.delete_webhook()
-    bot.set_webhook(url=f"https://telegram-bitrix-bot.onrender.com/webhook/{TOKEN}")
+    bot.set_webhook(url=f"https://your-domain.com/webhook/{TOKEN}")
+
     app.run(host="0.0.0.0", port=PORT)
