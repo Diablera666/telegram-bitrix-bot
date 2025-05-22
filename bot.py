@@ -183,3 +183,8 @@ application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
 application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL, handle_file))
 application.add_handler(MessageHandler(filters.TEXT, handle_text))
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
