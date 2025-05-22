@@ -1,197 +1,183 @@
 import os
 import logging
-import requests
-import hashlib
-from flask import Flask, request
-from telegram import (
-    Bot, Update, ReplyKeyboardMarkup, KeyboardButton
-)
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes
-)
 import asyncio
+import secrets
+from flask import Flask, request
+from telegram import Update, File as TelegramFile
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+    ContextTypes,
+)
+import requests
+from dotenv import load_dotenv
 
-# --- Конфигурация ---
-TOKEN = "7407477056:AAEIfxS0wH56loSpTuNoE-cYTwVwRZPMl-U"
-BITRIX_URL = "https://getman.bitrix24.kz/rest/270/1e5vf17l1tn1atcb/task.item.add.json"
-BITRIX_UPLOAD_URL = "https://getman.bitrix24.kz/rest/270/1e5vf17l1tn1atcb/disk.folder.uploadfile.json"
-BITRIX_FOLDER_ID = 123456  # замените на ваш ID папки
+load_dotenv()
 
-MAX_FILE_SIZE_MB = 50
+# === Настройки ===
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK")  # без токена в урле
+BITRIX_USER_ID_270 = 270
+BITRIX_USER_ID_12 = 12
+FOLDER_ID = 123  # ID папки в Bitrix24 (замени на свой)
 
-WEBHOOK_SECRET = hashlib.sha256(TOKEN.encode()).hexdigest()
-WEBHOOK_PATH = f"/webhook/{WEBHOOK_SECRET}"
-WEBHOOK_URL = f"https://telegram-bitrix-bot.onrender.com{WEBHOOK_PATH}"
-
-# --- Логирование ---
+# Логирование
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("bot")
 
-# --- Flask ---
+# Flask приложение
 app = Flask(__name__)
 
-# --- Telegram Application ---
-application = Application.builder().token(TOKEN).build()
-bot = Bot(token=TOKEN)
+# === Telegram bot ===
+application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-# --- Хранилище пользователей ---
+# === Секретный путь вебхука ===
+SECRET_PATH = secrets.token_hex(32)
+
+# Хранилище пользовательских данных
 user_data = {}
 
-# --- Команды ---
-MAIN_MENU = ReplyKeyboardMarkup(
-    [
-        [KeyboardButton("Вопрос 1"), KeyboardButton("Вопрос 2")],
-        [KeyboardButton("Вопрос 3"), KeyboardButton("Другое")],
-    ],
-    resize_keyboard=True,
-)
+MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+
+# === Обработчики ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_data[chat_id] = {"category": None, "text": None, "files": []}
-    await update.message.reply_text("Выберите категорию:", reply_markup=MAIN_MENU)
+    keyboard = [["Вопрос 1", "Вопрос 2"], ["Вопрос 3", "Другое"]]
+    await update.message.reply_text("Выберите категорию:", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
+    user_data[update.effective_user.id] = {
+        "category": None,
+        "text": "",
+        "files": [],
+    }
 
-async def handle_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
+async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     category = update.message.text
+    if category not in ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"]:
+        await update.message.reply_text("Выберите категорию из меню.")
+        return
 
-    if category in ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"]:
-        user_data[chat_id] = {"category": category, "text": None, "files": []}
-        await update.message.reply_text(f"✍️ Введите текст задачи для категории «{category}»")
-    else:
-        await update.message.reply_text("Пожалуйста, выберите одну из опций в меню.")
+    user_data[update.effective_user.id]["category"] = category
+    await update.message.reply_text("Отправьте текст и файлы, затем нажмите /confirm для подтверждения.")
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in user_data or not user_data[chat_id]["category"]:
-        await start(update, context)
+    uid = update.effective_user.id
+    if uid not in user_data:
+        await update.message.reply_text("Сначала введите /start.")
         return
 
-    if not user_data[chat_id]["text"]:
-        user_data[chat_id]["text"] = update.message.text
-        await update.message.reply_text("📎 Можете отправить файлы или нажмите /confirm для подтверждения.")
-    else:
-        await update.message.reply_text("Текст уже получен. Нажмите /confirm или отправьте файл.")
+    user_data[uid]["text"] += update.message.text + "\n"
 
-async def file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id not in user_data or not user_data[chat_id]["category"]:
-        await start(update, context)
+async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if uid not in user_data:
+        await update.message.reply_text("Сначала введите /start.")
         return
 
-    file = None
-    if update.message.document:
-        file = update.message.document
-    elif update.message.photo:
-        file = update.message.photo[-1]
-    elif update.message.video:
-        file = update.message.video
-    elif update.message.audio:
-        file = update.message.audio
-    elif update.message.voice:
-        file = update.message.voice
-    elif update.message.video_note:
-        file = update.message.video_note
-    elif update.message.sticker:
-        file = update.message.sticker
-
+    file = (
+        update.message.document or
+        update.message.photo[-1] or
+        update.message.video or
+        update.message.audio or
+        update.message.voice or
+        update.message.sticker
+    )
+    
     if not file:
-        await update.message.reply_text("❌ Формат не поддерживается.")
+        await update.message.reply_text("Неподдерживаемый тип файла.")
         return
 
-    if file.file_size and file.file_size > MAX_FILE_SIZE_MB * 1024 * 1024:
-        await update.message.reply_text("❌ Файл превышает лимит 50 МБ.")
+    file_id = file.file_id
+    tg_file: TelegramFile = await context.bot.get_file(file_id)
+    
+    # Проверка размера
+    if hasattr(file, "file_size") and file.file_size > MAX_FILE_SIZE_BYTES:
+        await update.message.reply_text("Файл слишком большой. Максимум 50 МБ.")
         return
 
-    os.makedirs("downloads", exist_ok=True)
-    file_path = f"downloads/{chat_id}_{file.file_id}"
-    await file.get_file().download_to_drive(file_path)
+    file_bytes = await tg_file.download_as_bytes()
+    filename = getattr(file, "file_name", f"{file_id}.bin")
 
-    user_data[chat_id]["files"].append(file_path)
-    await update.message.reply_text(f"📥 Файл получен. Всего файлов: {len(user_data[chat_id]['files'])}")
+    user_data[uid]["files"].append({"name": filename, "bytes": file_bytes})
 
-async def delete_last_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    files = user_data.get(chat_id, {}).get("files", [])
-    if files:
-        last_file = files.pop()
-        os.remove(last_file)
-        await update.message.reply_text("🗑️ Последний файл удалён.")
-    else:
-        await update.message.reply_text("Нет файлов для удаления.")
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    user_data.pop(chat_id, None)
-    await update.message.reply_text("❌ Создание задачи отменено.", reply_markup=MAIN_MENU)
+    await update.message.reply_text(f"Файл '{filename}' добавлен.")
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    data = user_data.get(chat_id)
-    if not data or not data["text"]:
-        await update.message.reply_text("Нет текста для создания задачи.")
+    uid = update.effective_user.id
+    if uid not in user_data:
+        await update.message.reply_text("Сначала введите /start.")
         return
 
-    text = data["text"]
+    data = user_data[uid]
     category = data["category"]
+    text = data["text"]
     files = data["files"]
-    responsible_id = 270 if category in ["Вопрос 1", "Вопрос 3"] else 12
+
+    if not category or not text.strip():
+        await update.message.reply_text("Пожалуйста, укажите категорию и текст.")
+        return
+
+    bitrix_user_id = BITRIX_USER_ID_270 if category in ["Вопрос 1", "Вопрос 3"] else BITRIX_USER_ID_12
 
     file_ids = []
-    for path in files:
-        filename = os.path.basename(path)
-        with open(path, "rb") as f:
-            response = requests.post(
-                BITRIX_UPLOAD_URL,
-                files={"file": (filename, f)},
-                data={"id": BITRIX_FOLDER_ID, "generateUniqueName": "Y"},
-            )
+    for file in files:
+        response = requests.post(
+            f"{BITRIX_WEBHOOK}/disk.folder.uploadfile.json",
+            params={"id": FOLDER_ID},
+            files={"file": (file["name"], file["bytes"])},
+        )
         result = response.json().get("result")
         if result and "ID" in result:
             file_ids.append(result["ID"])
 
     task_data = {
         "fields": {
-            "TITLE": f"{category} от пользователя {chat_id}",
+            "TITLE": f"{category} от {update.effective_user.first_name}",
             "DESCRIPTION": text,
-            "RESPONSIBLE_ID": responsible_id,
+            "RESPONSIBLE_ID": bitrix_user_id,
             "UF_TASK_WEBDAV_FILES": file_ids,
         }
     }
 
-    task_response = requests.post(BITRIX_URL, json=task_data)
-    if task_response.ok:
-        await update.message.reply_text("✅ Задача успешно создана!", reply_markup=MAIN_MENU)
+    res = requests.post(f"{BITRIX_WEBHOOK}/task.item.add.json", json=task_data)
+    if "result" in res.json():
+        await update.message.reply_text("Задача успешно создана ✅")
     else:
-        await update.message.reply_text("❌ Ошибка при создании задачи.")
+        await update.message.reply_text("Ошибка при создании задачи ❌")
 
-    user_data.pop(chat_id, None)
+    user_data.pop(uid)
 
-# --- Flask Webhook ---
-@app.route(WEBHOOK_PATH, methods=["POST"])
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    user_data.pop(uid, None)
+    await update.message.reply_text("Создание задачи отменено.")
+
+# === Flask route для вебхука ===
+@app.route(f"/webhook/{SECRET_PATH}", methods=["POST"])
 def webhook():
-    update = Update.de_json(request.get_json(force=True), bot)
-    asyncio.run(application.process_update(update))
-    return "OK"
+    update_data = request.get_json(force=True)
+    update = Update.de_json(update_data, application.bot)
 
-# --- Регистрация обработчиков ---
+    async def handle_update():
+        if not application._initialized:
+            await application.initialize()
+        await application.process_update(update)
+
+    asyncio.run(handle_update())
+    return "OK", 200
+
+# === Flask health-check ===
+@app.route("/")
+def index():
+    return "Bot is running", 200
+
+# === Регистрация обработчиков ===
 application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("cancel", cancel))
 application.add_handler(CommandHandler("confirm", confirm))
-application.add_handler(CommandHandler("delete", delete_last_file))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu))
-application.add_handler(MessageHandler(filters.TEXT & filters.COMMAND, handle_text))
-application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO |
-                                       filters.AUDIO | filters.VOICE | filters.Sticker.ALL |
-                                       filters.VIDEO_NOTE, file_handler))
-
-# --- Установка вебхука ---
-async def set_webhook():
-    await bot.set_webhook(WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-    print("Webhook установлен:", WEBHOOK_URL)
-
-if __name__ == "__main__":
-    import threading
-    threading.Thread(target=lambda: application.run_polling()).start()  # для dev
-    asyncio.run(set_webhook())
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+application.add_handler(CommandHandler("cancel", cancel))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
+application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL, handle_file))
+application.add_handler(MessageHandler(filters.TEXT, handle_text))
