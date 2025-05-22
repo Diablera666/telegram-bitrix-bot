@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+print("SECRET_PATH:", SECRET_PATH)
+
 # === Настройки ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
