@@ -3,24 +3,24 @@ import logging
 import asyncio
 from threading import Thread
 from flask import Flask, request
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     filters,
     ContextTypes
 )
 import requests
 from dotenv import load_dotenv
 
+# Загрузка переменных окружения
 load_dotenv()
 
 # Конфигурация
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "defaultsecret")
+WEBHOOK_PATH = os.getenv("WEBHOOK_SECRET", "defaultsecret")
 PORT = int(os.getenv("PORT", 10000))
 FOLDER_ID = 123  # Замените на реальный ID папки в Bitrix24
 
@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Инициализация бота
-bot = Bot(token=TOKEN)
 application = Application.builder().token(TOKEN).build()
 
 # Хранилище данных пользователей
@@ -43,23 +42,13 @@ user_data = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка команды /start"""
-    keyboard = [
-        ["Вопрос 1", "Вопрос 2"],
-        ["Вопрос 3", "Другое"]
-    ]
+    keyboard = [["Вопрос 1", "Вопрос 2"], ["Вопрос 3", "Другое"]]
+    reply_markup = {"keyboard": keyboard, "resize_keyboard": True, "one_time_keyboard": True}
     await update.message.reply_text(
         "Выберите категорию вопроса:",
-        reply_markup={
-            'keyboard': keyboard,
-            'resize_keyboard': True,
-            'one_time_keyboard': True
-        }
+        reply_markup=reply_markup
     )
-    user_data[update.effective_user.id] = {
-        'category': None,
-        'text': '',
-        'files': []
-    }
+    user_data[update.effective_user.id] = {'category': None, 'text': '', 'files': []}
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработка текстовых сообщений"""
@@ -103,6 +92,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     file_id = file.file_id
     file_name = getattr(file, 'file_name', f'file_{file_id[:8]}')
     
+    if 'files' not in user_data[user_id]:
+        user_data[user_id]['files'] = []
+    
     user_data[user_id]['files'].append({
         'id': file_id,
         'name': file_name
@@ -122,21 +114,22 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Сначала выберите категорию")
         return
         
-    if not data['text'] and not data['files']:
+    if not data['text'] and not data.get('files'):
         await update.message.reply_text("Добавьте текст или файлы")
         return
         
     # Загрузка файлов в Bitrix24
     file_ids = []
-    for file in data['files']:
+    for file in data.get('files', []):
         try:
-            file_obj = await bot.get_file(file['id'])
+            file_obj = await application.bot.get_file(file['id'])
             file_bytes = await file_obj.download_as_bytearray()
             
             response = requests.post(
                 f"{BITRIX_WEBHOOK}/disk.folder.uploadfile.json",
                 params={'id': FOLDER_ID},
-                files={'file': (file['name'], file_bytes)}
+                files={'file': (file['name'], file_bytes)},
+                timeout=30
             )
             
             if response.status_code == 200:
@@ -151,7 +144,7 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'fields': {
             'TITLE': f"{data['category']} от пользователя",
             'DESCRIPTION': data['text'],
-            'RESPONSIBLE_ID': BITRIX_USER_ID_270 if data['category'] in ["Вопрос 1", "Вопрос 3"] else BITRIX_USER_ID_12,
+            'RESPONSIBLE_ID': 270 if data['category'] in ["Вопрос 1", "Вопрос 3"] else 12,
             'UF_TASK_WEBDAV_FILES': file_ids
         }
     }
@@ -159,13 +152,15 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = requests.post(
             f"{BITRIX_WEBHOOK}/task.item.add.json",
-            json=task_data
+            json=task_data,
+            timeout=30
         )
         
         if response.status_code == 200:
             await update.message.reply_text("✅ Задача успешно создана!")
         else:
             await update.message.reply_text("❌ Ошибка при создании задачи")
+            logger.error(f"Ошибка Bitrix24: {response.text}")
     except Exception as e:
         logger.error(f"Ошибка создания задачи: {e}")
         await update.message.reply_text("⚠️ Ошибка соединения с Bitrix24")
@@ -180,28 +175,40 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Создание задачи отменено")
 
 def run_async():
-    """Запуск асинхронного event loop в отдельном потоке"""
+    """Запуск асинхронного event loop"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("confirm", confirm))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO, handle_file))
     
+    # Запуск event loop
     loop.run_forever()
 
-@app.route(f"/webhook/{WEBHOOK_SECRET}", methods=["POST"])
+@app.route(f"/webhook/{WEBHOOK_PATH}", methods=["POST"])
 def webhook():
     """Обработчик вебхука"""
     if request.method == "POST":
-        update = Update.de_json(request.json, application.bot)
-        asyncio.run_coroutine_threadsafe(
-            application.process_update(update),
-            application.updater._event_loop
-        )
-        return "ok"
+        try:
+            update = Update.de_json(request.json, application.bot)
+            
+            # Создаем задачу для обработки обновления
+            async def process_update():
+                await application.process_update(update)
+            
+            # Запускаем в существующем event loop
+            asyncio.run_coroutine_threadsafe(
+                process_update(),
+                application.updater._event_loop
+            )
+            return "ok", 200
+        except Exception as e:
+            logger.error(f"Ошибка в обработке вебхука: {e}")
+            return "error", 500
     return "Method not allowed", 405
 
 @app.route("/")
@@ -209,9 +216,9 @@ def index():
     return "Bot is running and waiting for updates!"
 
 if __name__ == "__main__":
-    # Запуск асинхронного event loop в отдельном потоке
-    thread = Thread(target=run_async)
-    thread.start()
+    # Запускаем бота в отдельном потоке
+    bot_thread = Thread(target=run_async, daemon=True)
+    bot_thread.start()
     
-    # Запуск Flask приложения
-    app.run(host="0.0.0.0", port=PORT)
+    # Запускаем Flask приложение
+    app.run(host="0.0.0.0", port=PORT, debug=False, use_reloader=False)
