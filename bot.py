@@ -17,8 +17,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-print("SECRET_PATH:", SECRET_PATH)
-
 # === Настройки ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
@@ -26,6 +24,7 @@ BITRIX_USER_ID_270 = 270
 BITRIX_USER_ID_12 = 12
 FOLDER_ID = 123  # Укажи актуальный ID папки
 SECRET_PATH = os.getenv("WEBHOOK_SECRET", "defaultsecret")
+print("SECRET_PATH:", SECRET_PATH)
 MAX_FILE_SIZE_MB = 50
 MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
