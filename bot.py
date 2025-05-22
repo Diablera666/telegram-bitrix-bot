@@ -2,16 +2,14 @@ import os
 import logging
 import asyncio
 
-import secrets
 from flask import Flask, request
 from telegram import Update, File as TelegramFile
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
-    filters,
     ContextTypes,
+    filters,
 )
 from telegram import ReplyKeyboardMarkup
 import requests
@@ -24,7 +22,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
 BITRIX_USER_ID_270 = 270
 BITRIX_USER_ID_12 = 12
-FOLDER_ID = 123  # ID папки в Bitrix24 (замени на свой)
+FOLDER_ID = 123  # Укажи актуальный ID папки
+SECRET_PATH = os.getenv("WEBHOOK_SECRET", "defaultsecret")
+MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # Логирование
 logging.basicConfig(level=logging.INFO)
@@ -33,23 +34,20 @@ logger = logging.getLogger("bot")
 # Flask приложение
 app = Flask(__name__)
 
-# === Telegram bot ===
+# Telegram bot
 application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-# === Секретный путь вебхука ===
-SECRET_PATH = secrets.token_hex(32)
 
 # Хранилище пользовательских данных
 user_data = {}
-
-MAX_FILE_SIZE_MB = 50
-MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 
 # === Обработчики ===
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["Вопрос 1", "Вопрос 2"], ["Вопрос 3", "Другое"]]
-    await update.message.reply_text("Выберите категорию:", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
+    await update.message.reply_text(
+        "Выберите категорию:",
+        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True),
+    )
     user_data[update.effective_user.id] = {
         "category": None,
         "text": "",
@@ -63,7 +61,9 @@ async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_data[update.effective_user.id]["category"] = category
-    await update.message.reply_text("Отправьте текст и файлы, затем нажмите /confirm для подтверждения.")
+    await update.message.reply_text(
+        "Отправьте текст и файлы, затем нажмите /confirm для подтверждения."
+    )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -80,22 +80,21 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     file = (
-        update.message.document or
-        update.message.photo[-1] or
-        update.message.video or
-        update.message.audio or
-        update.message.voice or
-        update.message.sticker
+        update.message.document
+        or update.message.photo[-1]
+        or update.message.video
+        or update.message.audio
+        or update.message.voice
+        or update.message.sticker
     )
-    
+
     if not file:
         await update.message.reply_text("Неподдерживаемый тип файла.")
         return
 
     file_id = file.file_id
     tg_file: TelegramFile = await context.bot.get_file(file_id)
-    
-    # Проверка размера
+
     if hasattr(file, "file_size") and file.file_size > MAX_FILE_SIZE_BYTES:
         await update.message.reply_text("Файл слишком большой. Максимум 50 МБ.")
         return
@@ -104,7 +103,6 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = getattr(file, "file_name", f"{file_id}.bin")
 
     user_data[uid]["files"].append({"name": filename, "bytes": file_bytes})
-
     await update.message.reply_text(f"Файл '{filename}' добавлен.")
 
 async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,7 +155,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data.pop(uid, None)
     await update.message.reply_text("Создание задачи отменено.")
 
-# === Flask route для вебхука ===
+# === Flask route для Telegram Webhook ===
 @app.route(f"/webhook/{SECRET_PATH}", methods=["POST"])
 def webhook():
     update_data = request.get_json(force=True)
@@ -171,20 +169,19 @@ def webhook():
     asyncio.run(handle_update())
     return "OK", 200
 
-# === Flask health-check ===
+# Health-check
 @app.route("/")
 def index():
     return "Bot is running", 200
 
-# === Регистрация обработчиков ===
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CommandHandler("confirm", confirm))
-application.add_handler(CommandHandler("cancel", cancel))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
-application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL, handle_file))
-application.add_handler(MessageHandler(filters.TEXT, handle_text))
-
+# === Запуск Flask-сервера ===
 if __name__ == "__main__":
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("confirm", confirm))
+    application.add_handler(CommandHandler("cancel", cancel))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL, handle_file))
+    application.add_handler(MessageHandler(filters.TEXT, handle_text))
+
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
