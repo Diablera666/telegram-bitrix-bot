@@ -55,20 +55,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
 async def handle_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     category = update.message.text
     if category not in ["Вопрос 1", "Вопрос 2", "Вопрос 3", "Другое"]:
         await update.message.reply_text("Выберите категорию из меню.")
         return
 
-    user_data[update.effective_user.id]["category"] = category
+    if uid not in user_data:
+        user_data[uid] = {"category": None, "text": "", "files": []}
+
+    user_data[uid]["category"] = category
     await update.message.reply_text(
         "Отправьте текст и файлы, затем нажмите /confirm для подтверждения."
     )
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if uid not in user_data:
-        await update.message.reply_text("Сначала введите /start.")
+    if uid not in user_data or user_data[uid]["category"] is None:
+        await update.message.reply_text("Сначала выберите категорию (/start).")
         return
 
     user_data[uid]["text"] += update.message.text + "\n"
@@ -81,7 +85,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     file = (
         update.message.document
-        or update.message.photo[-1]
+        or (update.message.photo[-1] if update.message.photo else None)
         or update.message.video
         or update.message.audio
         or update.message.voice
@@ -133,9 +137,10 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result and "ID" in result:
             file_ids.append(result["ID"])
 
+    username = update.effective_user.first_name or update.effective_user.username or "Пользователь"
     task_data = {
         "fields": {
-            "TITLE": f"{category} от {update.effective_user.first_name}",
+            "TITLE": f"{category} от {username}",
             "DESCRIPTION": text,
             "RESPONSIBLE_ID": bitrix_user_id,
             "UF_TASK_WEBDAV_FILES": file_ids,
@@ -179,9 +184,23 @@ if __name__ == "__main__":
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("confirm", confirm))
     application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_category))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL, handle_file))
-    application.add_handler(MessageHandler(filters.TEXT, handle_text))
+
+    # Категория только если категория еще не выбрана
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_category
+    ))
+    
+    # Текст после выбора категории
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        handle_text
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO | filters.VOICE | filters.Sticker.ALL,
+        handle_file
+    ))
 
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
