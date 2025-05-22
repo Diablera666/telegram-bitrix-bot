@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+
 import secrets
 from flask import Flask, request
 from telegram import Update, File as TelegramFile
@@ -12,14 +13,15 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from telegram import ReplyKeyboardMarkup
 import requests
 from dotenv import load_dotenv
 
 load_dotenv()
 
 # === Настройки ===
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK")  # без токена в урле
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+BITRIX_WEBHOOK = os.getenv("BITRIX_WEBHOOK_URL")
 BITRIX_USER_ID_270 = 270
 BITRIX_USER_ID_12 = 12
 FOLDER_ID = 123  # ID папки в Bitrix24 (замени на свой)
