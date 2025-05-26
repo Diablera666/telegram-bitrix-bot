@@ -127,17 +127,18 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка загрузки файла: {e}")
 
     task_data = {
-        'fields': {
-            'TITLE': f"{data['category']} от пользователя",
-            'DESCRIPTION': data['text'],
-            'RESPONSIBLE_ID': 270 if data['category'] in ["Вопрос 1", "Вопрос 3"] else 12,
-            'UF_TASK_WEBDAV_FILES': file_ids
-        }
+    'fields': {
+        'TITLE': f"{data['category']} от пользователя",
+        'DESCRIPTION': data['text'],
+        'RESPONSIBLE_ID': 270 if data['category'] in ["Вопрос 1", "Вопрос 3"] else 12,
+        'UF_TASK_WEBDAV_FILES': file_ids  # это сработает только с task.add.json
     }
+}
+
 
     try:
         response = requests.post(
-            f"{BITRIX_WEBHOOK}/task.item.add.json",
+            f"{BITRIX_WEBHOOK}task.add.json",
             json=task_data,
             timeout=30
         )
