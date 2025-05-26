@@ -205,15 +205,6 @@ def run_async():
     
     loop.run_forever()
 
-@app.route('/')
-def index():
-    return 'Bot server is running'
-
-@app.route(f'/webhook/{WEBHOOK_PATH}', methods=['POST'])
-def webhook():
-    return 'Webhook received', 200
-
-
 bot_event_loop = None
 
 if __name__ == "__main__":
