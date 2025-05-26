@@ -127,13 +127,14 @@ async def confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка загрузки файла: {e}")
 
     task_data = {
-    'fields': {
+    'data': {
         'TITLE': f"{data['category']} от пользователя",
         'DESCRIPTION': data['text'],
         'RESPONSIBLE_ID': 270 if data['category'] in ["Вопрос 1", "Вопрос 3"] else 12,
-        'UF_TASK_WEBDAV_FILES': file_ids  # это сработает только с task.add.json
+        'UF_TASK_WEBDAV_FILES': file_ids
     }
 }
+
 
 
     try:
