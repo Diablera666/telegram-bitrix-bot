@@ -9,3 +9,7 @@ services:
         sync: false
       - key: BITRIX_WEBHOOK_URL
         sync: false
+      - key: PORT
+        value: 10000
+      - key: WEBHOOK_SECRET
+        sync: false
