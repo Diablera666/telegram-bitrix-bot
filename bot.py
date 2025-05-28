@@ -1,7 +1,6 @@
 import os
 import logging
 import requests
-from flask import Flask, request, abort
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,20 +15,17 @@ BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8443))
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
-# Настройка логирования
+# Логирование
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Flask-приложение
-app = Flask(__name__)
 
 # Telegram Application
 application = Application.builder().token(TOKEN).build()
 
-# Память для сессий
+# Сессии пользователей
 user_sessions = {}
 
-# Категории и привязка к ID
+# Категории и ID ответственных
 CATEGORIES = {
     "Вопрос 1": 270,
     "Вопрос 2": 12,
@@ -50,14 +46,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
+    user_id = query.from_user.id
+
     if query.data.startswith("category|"):
         category = query.data.split("|", 1)[1]
-        user_id = query.from_user.id
-        user_sessions[user_id] = {
-            "category": category,
-            "text": None,
-            "files": []
-        }
+        user_sessions[user_id] = {"category": category, "text": None, "files": []}
+
         keyboard = [
             [InlineKeyboardButton("✅ Подтвердить", callback_data="confirm")],
             [InlineKeyboardButton("🗑 Удалить последний файл", callback_data="delete_last")],
@@ -65,7 +59,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🔙 Вернуться назад в меню", callback_data="back")]
         ]
         await query.message.reply_text(
-            f"Вы выбрали категорию: {category}\n\nОтправьте, пожалуйста, текст и, при необходимости, файлы. После этого нажмите 'Подтвердить'.",
+            f"Вы выбрали категорию: {category}\n\nОтправьте текст и файлы. Затем нажмите 'Подтвердить'.",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -73,16 +67,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_to_bitrix(update, context)
 
     elif query.data == "cancel":
-        user_sessions.pop(query.from_user.id, None)
+        user_sessions.pop(user_id, None)
         await query.message.reply_text("Создание задачи отменено.")
         await start(update, context)
 
     elif query.data == "back":
-        user_sessions.pop(query.from_user.id, None)
+        user_sessions.pop(user_id, None)
         await start(update, context)
 
     elif query.data == "delete_last":
-        session = user_sessions.get(query.from_user.id)
+        session = user_sessions.get(user_id)
         if session and session['files']:
             session['files'].pop()
             await query.message.reply_text("Последний файл удалён.")
@@ -94,7 +88,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session = user_sessions.get(update.message.from_user.id)
     if session is not None:
         session["text"] = update.message.text
-        await update.message.reply_text("Текст сохранён. Вы можете отправить файлы или нажать 'Подтвердить'.")
+        await update.message.reply_text("Текст сохранён. Отправьте файлы или нажмите 'Подтвердить'.")
 
 # Приём файлов
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -107,7 +101,7 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = getattr(update.message, kind, None)
         if file:
             if kind == 'photo':
-                file = file[-1]  # лучшее качество
+                file = file[-1]  # самое высокое качество
             break
 
     if not file:
@@ -122,9 +116,9 @@ async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "file_name": getattr(file, 'file_name', None)
     }
     session["files"].append(file_info)
-    await update.message.reply_text("Файл добавлен. Можете продолжить отправку или нажать 'Подтвердить'.")
+    await update.message.reply_text("Файл добавлен. Можете добавить ещё или подтвердить.")
 
-# Отправка в Bitrix24
+# Отправка задачи в Bitrix24
 async def send_to_bitrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.callback_query.from_user.id
     session = user_sessions.get(user_id)
@@ -139,7 +133,7 @@ async def send_to_bitrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bitrix_file_id:
             files_bitrix_ids.append(bitrix_file_id)
         else:
-            logger.warning("Failed to upload file: %s", file_url)
+            logger.warning("Ошибка загрузки файла: %s", file_url)
 
     task_data = {
         "fields": {
@@ -153,17 +147,17 @@ async def send_to_bitrix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = requests.post(BITRIX_WEBHOOK_URL, json=task_data)
         response.raise_for_status()
-        await update.callback_query.message.reply_text("Задача успешно создана в Bitrix24!")
+        await update.callback_query.message.reply_text("✅ Задача создана в Bitrix24!")
     except Exception as e:
         logger.error("Ошибка при создании задачи", exc_info=e)
-        await update.callback_query.message.reply_text("Ошибка при создании задачи в Bitrix24.")
+        await update.callback_query.message.reply_text("❌ Не удалось создать задачу в Bitrix24.")
 
     user_sessions.pop(user_id, None)
 
 # Загрузка файла в Bitrix
 def upload_file_to_bitrix(file_url, filename):
     folder_id = "0"
-    upload_url = BITRIX_WEBHOOK_URL.replace("task.item.add.json", f"disk.folder.uploadfile.json")
+    upload_url = BITRIX_WEBHOOK_URL.replace("task.item.add.json", "disk.folder.uploadfile.json")
 
     data = {
         "id": folder_id,
@@ -177,36 +171,23 @@ def upload_file_to_bitrix(file_url, filename):
             response = requests.post(upload_url, data=data, files=files)
             response.raise_for_status()
             result = response.json()
-            file_id = result.get("result", {}).get("ID")
-            if not file_id:
-                logger.error("No file ID in response: %s", result)
-            return file_id
+            return result.get("result", {}).get("ID")
     except Exception as e:
-        logger.error("Failed to upload file: %s", file_url)
+        logger.error("Ошибка загрузки в Bitrix", exc_info=e)
         return None
 
-# Webhook обработчик
-@app.post(f"/webhook/{WEBHOOK_SECRET}")
-def webhook():
-    try:
-        update = Update.de_json(request.get_json(force=True), application.bot)
-        application.update_queue.put_nowait(update)
-    except Exception as e:
-        logger.error("Failed to process update", exc_info=e)
-    return "OK"
-
-# Обработка корня
-@app.route("/")
-def index():
-    return "OK", 200
-
-# Регистрация хендлеров
+# Хендлеры
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(handle_callback))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 application.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_file))
 
+# Запуск через вебхук
 if __name__ == '__main__':
     webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/{WEBHOOK_SECRET}"
     logger.info(f"Setting webhook to: {webhook_url}")
-    application.run_webhook(listen="0.0.0.0", port=PORT, webhook_url=webhook_url)
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        webhook_url=webhook_url
+    )
