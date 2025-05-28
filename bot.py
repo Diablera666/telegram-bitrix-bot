@@ -175,11 +175,14 @@ def upload_file_to_bitrix(file_url, filename):
 
 # Обработчик Webhook от Telegram
 @app.route(f"/{WEBHOOK_SECRET}", methods=["POST"])
-async def webhook():
-    await application.initialize()
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    await application.process_update(update)
+def webhook():
+    application.create_task(
+        application.update_queue.put(
+            Update.de_json(request.get_json(force=True), application.bot)
+        )
+    )
     return "ok", 200
+
 
 # Корневая страница
 @app.route("/", methods=["GET"])
